@@ -13,11 +13,6 @@ This doc gets you from a blank Pico 2 to a working MCP connection as fast
 as possible. For everything else, see:
 - **`userguide.md`** — full peripheral-by-peripheral usage, pinout,
   troubleshooting.
-- **`protocol.md`** — wire protocol spec.
-- **`handoff.md`** — build status, verification status per peripheral,
-  known issues, real bugs found during hardware bring-up.
-- **`rp2350_digital_signal_agent_plan.md`** — design background and
-  rationale.
 
 ## What you need
 
