@@ -1,0 +1,140 @@
+[
+  {
+    "name": "request_get_info",
+    "file": "request_get_info.bin",
+    "description": "Minimal valid request, no payload.",
+    "size": 24
+  },
+  {
+    "name": "request_get_capabilities",
+    "file": "request_get_capabilities.bin",
+    "description": "Minimal valid request, no payload.",
+    "size": 24
+  },
+  {
+    "name": "request_ping_echo",
+    "file": "request_ping_echo.bin",
+    "description": "Request with a payload the PING handler must echo back.",
+    "size": 42
+  },
+  {
+    "name": "response_unsupported_opcode",
+    "file": "response_unsupported_opcode.bin",
+    "description": "Synthetic ERROR response for an opcode that doesn't exist (999).",
+    "size": 24
+  },
+  {
+    "name": "resync_after_garbage_prefix",
+    "file": "resync_after_garbage_prefix.bin",
+    "description": "Garbage bytes followed by a valid frame \u2014 parser must resync on magic and decode the trailing frame, incrementing magic_resyncs.",
+    "size": 63
+  },
+  {
+    "name": "bad_crc",
+    "file": "bad_crc.bin",
+    "description": "Valid header/payload, corrupted trailing CRC byte \u2014 must yield STATUS_BAD_CRC and not dispatch the opcode.",
+    "size": 24
+  },
+  {
+    "name": "request_arm_outputs",
+    "file": "request_arm_outputs.bin",
+    "description": "ARM_OUTPUTS with an all-zero challenge (never valid against a real device \u2014 for wire-layout decode testing only) requesting GP0/GP1 as output with a 3000ms lease.",
+    "size": 48
+  },
+  {
+    "name": "request_digital_write_masked",
+    "file": "request_digital_write_masked.bin",
+    "description": "Drive GP0 high, GP1 low, leave the rest untouched.",
+    "size": 26
+  },
+  {
+    "name": "request_digital_read",
+    "file": "request_digital_read.bin",
+    "description": "Read all 8 channels.",
+    "size": 25
+  },
+  {
+    "name": "request_digital_capture_start",
+    "file": "request_digital_capture_start.bin",
+    "description": "Start an unbounded capture at 5000 Hz.",
+    "size": 32
+  },
+  {
+    "name": "request_digital_capture_read",
+    "file": "request_digital_capture_read.bin",
+    "description": "Read 400 samples from offset 0 of capture_id=1.",
+    "size": 36
+  },
+  {
+    "name": "event_digital_capture_complete",
+    "file": "event_digital_capture_complete.bin",
+    "description": "Unsolicited capture-complete EVENT for a bounded capture (id=2, 200/200 samples) \u2014 sequence=0 is the unsolicited-frame convention.",
+    "size": 32
+  },
+  {
+    "name": "request_pwm_config",
+    "file": "request_pwm_config.bin",
+    "description": "Enable PWM on channel 0 at 1000 Hz, 50% duty (channel must already be in the ARM_OUTPUTS armed mask on a real device).",
+    "size": 36
+  },
+  {
+    "name": "request_spi_xfer",
+    "file": "request_spi_xfer.bin",
+    "description": "Mode 0 transfer at 100kHz, 4 bytes full-duplex.",
+    "size": 36
+  },
+  {
+    "name": "request_spi_slave_config",
+    "file": "request_spi_slave_config.bin",
+    "description": "Enable the SPI slave (GP12-15).",
+    "size": 28
+  },
+  {
+    "name": "request_i2c_xfer",
+    "file": "request_i2c_xfer.bin",
+    "description": "Write register pointer 0x00 to device 0x50, then read 4 bytes back (repeated start, combined write-then-read).",
+    "size": 33
+  },
+  {
+    "name": "request_i2c_slave_config",
+    "file": "request_i2c_slave_config.bin",
+    "description": "Enable the I2C slave (i2c1) at address 0x42.",
+    "size": 28
+  },
+  {
+    "name": "request_uart_config",
+    "file": "request_uart_config.bin",
+    "description": "Configure UART0 at 115200 baud, 8N1.",
+    "size": 32
+  },
+  {
+    "name": "request_uart_write",
+    "file": "request_uart_write.bin",
+    "description": "UART_WRITE payload is the raw bytes to send, no wrapper struct.",
+    "size": 34
+  },
+  {
+    "name": "request_uart_read",
+    "file": "request_uart_read.bin",
+    "description": "Read up to 64 bytes from the RX ring.",
+    "size": 26
+  },
+  {
+    "name": "request_adc_scan_config",
+    "file": "request_adc_scan_config.bin",
+    "description": "Start an unbounded 3-channel round-robin scan at 3000 Hz total.",
+    "size": 36
+  },
+  {
+    "name": "request_adc_scan_read",
+    "file": "request_adc_scan_read.bin",
+    "description": "Read 242 samples (max that fits one 512-byte frame at 2 bytes each) from offset 0 of scan_id=1.",
+    "size": 36
+  },
+  {
+    "name": "event_adc_scan_complete",
+    "file": "event_adc_scan_complete.bin",
+    "description": "Unsolicited ADC block-ready EVENT for a bounded scan (id=3, 300 samples).",
+    "size": 32
+  }
+]

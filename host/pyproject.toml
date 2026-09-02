@@ -1,0 +1,27 @@
+[project]
+name = "rp2350-signal-agent"
+version = "0.1.0"
+description = "Host library, MCP server, and CLI for the RP2350 Digital-Signal Agent Interface"
+requires-python = ">=3.10"
+dependencies = [
+    "pyusb>=1.2",
+    "mcp>=2.0",
+]
+
+[project.optional-dependencies]
+gui = [
+    "PySide6>=6.5",
+    "pyqtgraph>=0.13",
+]
+
+[project.scripts]
+rp2350-signal-mcp = "mcp_server.server:main"
+rp2350-signal-cli = "cli.main:main"
+rp2350-signal-gui = "gui.main:main"
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["device", "mcp_server", "cli", "gui", "gui.tabs"]

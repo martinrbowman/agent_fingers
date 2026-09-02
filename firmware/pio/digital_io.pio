@@ -1,0 +1,43 @@
+;
+; Bidirectional 8-pin digital I/O bank (GP0-7). Two independent state
+; machines share the same 8 pins: digital_io_ctrl only ever drives
+; direction/value (never reads), digital_io_sample only ever reads (never
+; touches pindirs or pin output) — so there is no ownership conflict between
+; them despite both mapping to the same GPIOs.
+
+; Triggered on demand from firmware (not free-running): waits for a
+; direction word, then a value word, applies both atomically to the pin
+; group, and waits for the next pair. This is how ARM/DISARM/WRITE all
+; reach the pins — always as a matched (pindirs, values) pair, never one
+; without the other, so the bank can't glitch through an intermediate state.
+.program digital_io_ctrl
+.wrap_target
+    pull block
+    out pindirs, 8
+    pull block
+    out pins, 8
+.wrap
+
+; Triggered on demand: waits for any word from firmware, samples the 8 pins
+; once, and pushes the result. Read-only — never sets pindirs or drives pins,
+; so it's safe to run concurrently with digital_io_ctrl on the same GPIOs.
+.program digital_io_sample
+.wrap_target
+    pull block
+    mov isr, null
+    in pins, 8
+    push block
+.wrap
+
+; Free-running periodic capture, paced entirely by the SM clock divider
+; (see digital_bank_c's clkdiv computation) rather than a software delay
+; loop, so the achievable rate range is a function of the system clock, not
+; hand-tuned constants. Explicit mov+push each iteration rather than relying
+; on autopush's ISR-clear timing — same reasoning as digital_io_sample.
+; Read-only, same pins, no conflict with the other two SMs.
+.program digital_io_capture
+.wrap_target
+    mov isr, null
+    in pins, 8
+    push block
+.wrap

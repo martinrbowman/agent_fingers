@@ -1,0 +1,16 @@
+build
+!.vscode/*
+
+# macOS
+.DS_Store
+
+# clangd
+.cache/
+
+# Python (host/)
+__pycache__/
+*.pyc
+*.egg-info/
+.venv/
+venv/
+

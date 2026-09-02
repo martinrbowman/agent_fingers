@@ -1,0 +1,49 @@
+# Source of truth for GPIO ownership on the Pico 2 target.
+# Mirrored in firmware/io/pin_claims.c — keep both in sync by hand until a
+# code-generation step derives one from the other.
+#
+# owner values match pin_owner_t in firmware/io/pin_claims.h
+
+board: pico2
+total_gpio: 26
+
+pins:
+  GP0: {owner: digital_io}
+  GP1: {owner: digital_io}
+  GP2: {owner: digital_io}
+  GP3: {owner: digital_io}
+  GP4: {owner: digital_io}
+  GP5: {owner: digital_io}
+  GP6: {owner: digital_io}
+  GP7: {owner: digital_io}
+
+  GP8:  {owner: spi_master, signal: SCK}
+  GP9:  {owner: spi_master, signal: MOSI}
+  GP10: {owner: spi_master, signal: MISO}
+  GP11: {owner: spi_master, signal: CS0_n}
+
+  GP12: {owner: spi_slave, signal: SCK}
+  GP13: {owner: spi_slave, signal: MOSI}
+  GP14: {owner: spi_slave, signal: MISO}
+  GP15: {owner: spi_slave, signal: CS_n}
+
+  GP16: {owner: uart, signal: TX}
+  GP17: {owner: uart, signal: RX}
+
+  GP18: {owner: i2c_slave, signal: SDA}
+  GP19: {owner: i2c_slave, signal: SCL}
+
+  GP20: {owner: i2c_master, signal: SDA}
+  GP21: {owner: i2c_master, signal: SCL}
+
+  GP22: {owner: debug, signal: scope_trigger}
+
+  GP23: {owner: reserved_board, note: board power control, not header-exposed for product use}
+  GP24: {owner: reserved_board, note: board power control, not header-exposed for product use}
+  GP25: {owner: reserved_board, note: onboard LED, boot/dev-only, never a required signal}
+
+  GP26: {owner: adc, signal: ADC0}
+  GP27: {owner: adc, signal: ADC1}
+  GP28: {owner: adc, signal: ADC2}
+
+  GP29: {owner: reserved_board, note: VSYS sense / ADC3, not usable as a general ADC input}

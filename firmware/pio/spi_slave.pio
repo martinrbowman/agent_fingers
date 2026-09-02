@@ -1,0 +1,31 @@
+;
+; SPI slave, Mode 0 only (CPOL=0, CPHA=0). MOSI is the IN pin, MISO is the
+; OUT pin. SCK is read directly via an absolute `wait gpio` — not side-set,
+; since side-set drives a pin and this slave does not drive SCK, the
+; connected master does.
+;
+; CS is deliberately not synchronized here: this program reacts to SCK
+; edges unconditionally. Correctness relies on the connected master
+; never toggling SCK while this slave is deselected — standard SPI
+; etiquette, and the same assumption satisfied by this project's own PIO
+; SPI master (spi_master.pio), which only clocks SCK while its own CS is
+; asserted. Firmware watches CS separately via plain GPIO, purely to count
+; transaction boundaries — it does not gate this loop, and MISO is not
+; tri-stated when deselected (fine for a single-slave bus).
+;
+; Same Mode-0 reasoning as the master, argued from what each
+; instruction does rather than a memorized CPOL/CPHA table: MOSI is
+; captured on the SCK rising edge, MISO is set up during the low phase
+; beforehand.
+;
+; GPIO 12 is hardcoded below as the absolute SCK pin number, matching the
+; frozen pin plan (hardware/pin_claims.yaml). `wait gpio N` takes an
+; absolute pin index rather than a pin relative to this SM's own configured
+; mapping, so — unlike the IN/OUT pins — it isn't parameterized from C.
+.program spi_slave_mode0
+.wrap_target
+    wait 1 gpio 12  ; SCK rising edge: sample MOSI
+    in  pins, 1
+    wait 0 gpio 12  ; SCK falling edge: set up next MISO bit
+    out pins, 1
+.wrap

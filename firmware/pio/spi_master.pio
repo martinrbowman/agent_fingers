@@ -1,0 +1,28 @@
+;
+; SPI master, Mode 0 only (CPOL=0, CPHA=0). SCK is side-set pin 0, MOSI
+; is the OUT pin, MISO is the IN pin. CS is plain firmware-driven GPIO, not
+; PIO — asserted before the SM starts clocking, released after the last RX
+; byte is confirmed drained, no cycle-accurate CS/SCK relationship needed
+; for the slave peripherals this is meant to talk to.
+;
+; Correctness is argued directly from what each instruction does, not from
+; a memorized CPOL/CPHA truth table: MOSI is set up while SCK is held low
+; ("side 0"), MISO is sampled while SCK is held high ("side 1") — data
+; stable through the low phase, captured on the rising edge, is Mode 0 by
+; definition. The [1] delay after each instruction gives a symmetric 50%
+; duty cycle with margin either side of the sample point.
+;
+; Autopull/autopush must be enabled with an 8-bit threshold, shift left
+; (MSB first) — configured in C, not here.
+;
+; Idle behavior: the loop always stalls (waiting for TX FIFO data via
+; autopull) on the first instruction below, whose side-set value is 0 — so
+; SCK sits low between transfers and between bytes, matching Mode 0's
+; idle-low convention without any extra idle-state handling.
+.program spi_master_mode0
+.side_set 1
+
+.wrap_target
+    out pins, 1  side 0 [1]
+    in  pins, 1  side 1 [1]
+.wrap
