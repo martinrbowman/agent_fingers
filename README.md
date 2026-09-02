@@ -1,5 +1,8 @@
 # Agent Fingers
 
+Free for personal and non-commercial use. If this is useful to you,
+consider [buying me a coffee](https://buymeacoffee.com/redwolfelectronics).
+
 An AI-agent-controllable digital-signal instrument on a stock **Raspberry
 Pi Pico 2** — no custom board. An 8-channel bidirectional digital I/O
 bank, 3-channel ADC, PWM, UART, I2C (master + slave), and SPI
