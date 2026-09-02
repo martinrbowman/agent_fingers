@@ -138,12 +138,9 @@ firmware itself doesn't gate.
 All rate ceilings above are **provisional software limits chosen for
 safety margin** (bounding worst-case block time under the watchdog
 window, or avoiding an unverified hardware claim), not measured hardware
-maximums — see `protocol.md` for the reasoning behind each one.
+maximums
 
 ## Hardware-verified status
 
 Every peripheral above has been exercised against a real, physically
-wired Pico 2 this project — not just compiled and assumed correct. Full
-per-peripheral verification status (what's proven, what's still
-outstanding, and every real bug found and fixed along the way) is in
-`handoff.md`.
+wired Pico 2 this project — not just compiled and assumed correct. 
