@@ -1,0 +1,8 @@
+#pragma once
+
+#define FW_VERSION_MAJOR 0
+#define FW_VERSION_MINOR 1
+#define FW_VERSION_PATCH 0
+
+#define FW_GIT_HASH "1848c71c"
+#define FW_BUILD_TIMESTAMP_UTC "2026-09-02T23:54:54Z"
