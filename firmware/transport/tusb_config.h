@@ -13,9 +13,11 @@
 #define CFG_TUD_CDC_TX_BUFSIZE 64
 #define CFG_TUD_CDC_EP_BUFSIZE 64
 
-// Must comfortably hold one full protocol frame (header + payload cap + crc
-// = 20+512+4 = 536 bytes) — tud_vendor_write() silently truncates to
-// whatever FIFO space is available if this is smaller than the frame, and
-// the default (64) is nowhere near big enough.
-#define CFG_TUD_VENDOR_RX_BUFSIZE 576
-#define CFG_TUD_VENDOR_TX_BUFSIZE 576
+// Does NOT need to hold a whole protocol frame -- usb_vendor_output()
+// writes in a loop, waiting on tud_task() whenever the FIFO's full, so
+// frames much larger than this (up to header+PROTOCOL_RX_PAYLOAD_CAP+crc,
+// currently 8216 bytes) still send correctly, just via more chunks. This
+// just needs to comfortably beat the default (64, nowhere near enough)
+// to keep the write loop from stalling on every single USB packet.
+#define CFG_TUD_VENDOR_RX_BUFSIZE 2048
+#define CFG_TUD_VENDOR_TX_BUFSIZE 2048

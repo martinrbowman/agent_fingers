@@ -10,7 +10,7 @@ MAGIC = 0x5349474C
 VERSION = 1
 HEADER_SIZE = 20
 MAX_PAYLOAD = 16384
-RX_PAYLOAD_CAP = 512  # firmware bring-up ceiling, see protocol.md
+RX_PAYLOAD_CAP = 8192  # request/response payload buffer size, see protocol.md
 
 # magic,version,type,flags,sequence,opcode,status,payload_len
 HEADER_STRUCT = struct.Struct("<IBBHIHHI")
@@ -79,7 +79,7 @@ PWM_CONFIG_REQUEST_STRUCT = struct.Struct("<BBHIHH")
 PWM_CONFIG_RESPONSE_STRUCT = struct.Struct("<IHH")
 
 DIGITAL_CAPTURE_MAX_RATE_HZ = 200000
-DIGITAL_CAPTURE_BUFFER_SAMPLES = 1024
+DIGITAL_CAPTURE_BUFFER_SAMPLES = 4096
 
 # rate_hz,max_samples
 DIGITAL_CAPTURE_START_REQUEST_STRUCT = struct.Struct("<II")

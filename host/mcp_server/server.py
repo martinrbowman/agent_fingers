@@ -9,6 +9,7 @@ Or via the installed console script: `rp2350-signal-mcp [--device SERIAL]`
 """
 
 import argparse
+import base64
 import functools
 import sys
 
@@ -45,6 +46,15 @@ def _get_device() -> Device:
     if _device is None:
         raise DeviceError("no device connection — server did not start correctly")
     return _device
+
+
+def _b64(data: bytes) -> str:
+    """Base64 for binary tool outputs -- ~33% size overhead vs raw bytes,
+    against hex's 100%, so responses carrying real payloads (samples,
+    xfer data) cost meaningfully fewer JSON-RPC/token bytes. Only used for
+    outputs; hex stays for the small input parameters (payload_hex,
+    tx_hex, etc.) since those are easier to construct/read by hand."""
+    return base64.b64encode(data).decode("ascii")
 
 
 def _audited(tool_name):
@@ -105,7 +115,7 @@ def device_ping(payload_hex: str = "") -> dict:
     at the moment of the reply. Also renews the output-arm lease if one is
     currently armed."""
     result = _get_device().ping(bytes.fromhex(payload_hex))
-    return {"uptime_us": result["uptime_us"], "echo_hex": result["echo"].hex()}
+    return {"uptime_us": result["uptime_us"], "echo_b64": _b64(result["echo"])}
 
 
 # -- Digital bank: arm/disarm/read/write ------------------------------------
@@ -165,11 +175,11 @@ def digital_read(mask: int = 0xFF) -> dict:
 @_audited("digital_capture_start")
 def digital_capture_start(rate_hz: int, max_samples: int = 0) -> dict:
     """Starts continuous periodic sampling of all 8 digital-bank channels
-    into a 1024-sample ring, independent of arm state. rate_hz is clamped
+    into a 4096-sample ring, independent of arm state. rate_hz is clamped
     to what the hardware clock divider can reach on this board (roughly
     763Hz-200kHz, the ceiling is an unvalidated software limit, not a
     measured one). max_samples=0 runs until digital_capture_stop; a
-    nonzero value is a bounded burst (capped at 1024) that completes on
+    nonzero value is a bounded burst (capped at 4096) that completes on
     its own — poll digital_capture_read and check total_captured to see
     when it's done. Always allowed, a pure read of external signals."""
     return _get_device().digital_capture_start(rate_hz, max_samples)
@@ -180,10 +190,15 @@ def digital_capture_start(rate_hz: int, max_samples: int = 0) -> dict:
 def digital_capture_read(capture_id: int, offset: int, limit: int) -> dict:
     """Pages out up to `limit` samples (each one byte, bit-per-channel)
     starting at absolute sample index `offset` from the named capture.
-    overrun_count is nonzero if the ring wrapped past data you hadn't read
-    yet — the read still returns the best data still available."""
+    A single call can return at most 8164 samples regardless of `limit`
+    (the wire frame's fixed payload cap) -- check `returned_count` in the
+    result against what you asked for, and if it's short, call again with
+    offset += returned_count to get the rest. The whole 4096-sample ring
+    fits in one call either way. overrun_count is nonzero if the ring
+    wrapped past data you hadn't read yet — the read still returns the
+    best data still available."""
     result = dict(_get_device().digital_capture_read(capture_id, offset, limit))
-    result["samples_hex"] = result.pop("samples").hex()
+    result["samples_b64"] = _b64(result.pop("samples"))
     return result
 
 
@@ -278,7 +293,7 @@ def uart_read(max_bytes: int = 480) -> dict:
     framing/parity/break/overrun error counters since the last
     uart_config. Always allowed, a pure read."""
     result = dict(_get_device().uart_read(max_bytes))
-    result["data_hex"] = result.pop("data").hex()
+    result["data_b64"] = _b64(result.pop("data"))
     return result
 
 
@@ -301,7 +316,7 @@ def i2c_xfer(address: int, write_hex: str = "", read_length: int = 0, timeout_ms
     policy.require_writes_enabled("i2c_xfer")
     policy.require_i2c_address_allowed(address)
     result = dict(_get_device().i2c_xfer(address, bytes.fromhex(write_hex), read_length, timeout_ms))
-    result["data_hex"] = result.pop("data").hex()
+    result["data_b64"] = _b64(result.pop("data"))
     return result
 
 
@@ -332,7 +347,7 @@ def spi_xfer(tx_hex: str, hz: int = 100000, mode: int = 0) -> dict:
     no read-only mode, every transfer drives MOSI/SCK/CS."""
     policy.require_writes_enabled("spi_xfer")
     result = dict(_get_device().spi_xfer(bytes.fromhex(tx_hex), hz, mode))
-    result["data_hex"] = result.pop("data").hex()
+    result["data_b64"] = _b64(result.pop("data"))
     return result
 
 

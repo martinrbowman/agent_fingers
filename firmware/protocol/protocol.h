@@ -11,11 +11,18 @@
 #define PROTOCOL_HEADER_SIZE 20
 #define PROTOCOL_MAX_PAYLOAD 16384u
 
-// Step-3 bring-up ceiling: the receive/transmit buffers only hold this much
-// until the hardened streaming parser (backpressure/credits, step 4) lands.
-// Frames within PROTOCOL_MAX_PAYLOAD but over this cap get a
-// STATUS_PAYLOAD_TOO_LARGE error rather than being buffered.
-#define PROTOCOL_RX_PAYLOAD_CAP 512u
+// Size of the firmware's fixed request/response payload buffers -- frames
+// within PROTOCOL_MAX_PAYLOAD but over this cap get a STATUS_PAYLOAD_TOO_LARGE
+// error (requests) or get paginated across multiple calls (responses, e.g.
+// DIGITAL_CAPTURE_READ) rather than being buffered whole. Raised from the
+// original 512 (a step-3 bring-up ceiling) to comfortably fit a full
+// DIGITAL_CAPTURE_READ of the 4096-sample capture ring in one call instead
+// of ~9 round trips -- found wanting when a caller requesting the full
+// 4096-sample limit silently got back only ~484 samples per call, with no
+// signal anywhere that it needed to loop. RAM cost scales with this
+// constant (payload buffer, TX buffer, and the CRC scratch buffer all size
+// off it); at this value it's still under 5% of RP2350's 520KB SRAM.
+#define PROTOCOL_RX_PAYLOAD_CAP 8192u
 
 typedef enum {
     FRAME_TYPE_REQUEST  = 1,
