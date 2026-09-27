@@ -7,10 +7,10 @@
 // binary protocol transport. Both are separate TinyUSB interfaces; the
 // framed protocol runs on vendor bulk exclusively — see usb_vendor.c.
 #define CFG_TUD_CDC 1
-#define CFG_TUD_VENDOR 1
+#define CFG_TUD_VENDOR 1 // control/capture channel; CMSIS-DAP v2 has its own driver (debug/dap_usb.c)
 
 #define CFG_TUD_CDC_RX_BUFSIZE 64
-#define CFG_TUD_CDC_TX_BUFSIZE 64
+#define CFG_TUD_CDC_TX_BUFSIZE 256
 #define CFG_TUD_CDC_EP_BUFSIZE 64
 
 // Does NOT need to hold a whole protocol frame -- usb_vendor_output()

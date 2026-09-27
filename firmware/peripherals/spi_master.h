@@ -24,9 +24,21 @@ typedef struct {
     uint32_t granted_hz;
 } spi_master_xfer_result_t;
 
-// Returns false (nothing transferred) if mode != 0 (only mode 0 is
-// implemented this pass) or len > SPI_MASTER_MAX_LEN. rx_data_out must be
-// sized for len bytes. Full-duplex: exactly len bytes go out and len bytes
-// come back, in lockstep.
-bool spi_master_xfer(uint8_t mode, uint32_t hz, const uint8_t *tx_data, uint16_t len,
-                      uint8_t *rx_data_out, spi_master_xfer_result_t *out);
+typedef enum {
+    SPI_MASTER_OK = 0,
+    SPI_MASTER_INVALID, // mode != 0 (only mode 0 this pass) or len too large
+    SPI_MASTER_BUSY,    // pins owned by a debug session, or claimed mid-transfer
+} spi_master_status_t;
+
+// rx_data_out must be sized for len bytes. Full-duplex: exactly len bytes
+// go out and len bytes come back, in lockstep. A debug session claiming
+// the pins aborts a transfer in progress (SPI_MASTER_BUSY; rx data then
+// meaningless).
+spi_master_status_t spi_master_xfer(uint8_t mode, uint32_t hz, const uint8_t *tx_data, uint16_t len,
+                                     uint8_t *rx_data_out, spi_master_xfer_result_t *out);
+
+// Debug-probe handover (core0 only, via debug_session.c): release puts
+// GP8-11 high-Z with no pulls and input buffers off; reclaim restores the
+// SPI master's pin setup.
+void spi_master_release_pins(void);
+void spi_master_reclaim_pins(void);

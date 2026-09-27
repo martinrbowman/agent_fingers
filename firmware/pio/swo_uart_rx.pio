@@ -1,0 +1,21 @@
+;
+; SWO capture, UART (NRZ) mode: 8N1 receiver at 8x oversampling, adapted
+; from pico-examples uart_rx.pio. IN pin and JMP pin are both SWO (GP10).
+; Shift right, autopush off: each good byte lands in ISR bits 31..24 and is
+; pushed explicitly; a byte with a bad stop bit is dropped and the SM waits
+; for the line to go idle again.
+;
+; Clock divider = clk_sys / (8 * baud), so the fastest SWO rate is
+; clk_sys / 8 (18.75 Mbaud at 150 MHz).
+.program swo_uart_rx
+start:
+    wait 0 pin 0        ; start bit
+    set x, 7    [10]    ; to the middle of the first data bit
+bitloop:
+    in pins, 1
+    jmp x-- bitloop [6] ; 8 cycles per bit
+    jmp pin good_stop   ; stop bit must be high
+    wait 1 pin 0        ; framing error / break: wait for idle
+    jmp start
+good_stop:
+    push

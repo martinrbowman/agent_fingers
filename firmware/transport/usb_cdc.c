@@ -1,5 +1,6 @@
 #include "transport/usb_cdc.h"
 #include "build_info.h"
+#include "debug/dap.h"
 #include "tusb.h"
 #include <stdbool.h>
 #include <stdio.h>
@@ -13,9 +14,13 @@ void usb_cdc_init(void) {
 void usb_cdc_task(void) {
     bool connected = tud_cdc_connected();
     if (connected && !s_was_connected) {
-        char banner[96];
-        int n = snprintf(banner, sizeof(banner), "agent_fingers %d.%d.%d (%s)\r\n",
-                          FW_VERSION_MAJOR, FW_VERSION_MINOR, FW_VERSION_PATCH, FW_GIT_HASH);
+        char banner[160];
+        int n = snprintf(banner, sizeof(banner),
+                          "agent_fingers %d.%d.%d (%s)\r\n"
+                          "debug probe: SWD max %lu kHz, JTAG max %lu kHz (bit-bang, measured)\r\n",
+                          FW_VERSION_MAJOR, FW_VERSION_MINOR, FW_VERSION_PATCH, FW_GIT_HASH,
+                          (unsigned long)(dap_swd_max_hz() / 1000u),
+                          (unsigned long)(dap_jtag_max_hz() / 1000u));
         if (n > 0) {
             tud_cdc_write(banner, (uint32_t)n);
             tud_cdc_write_flush();

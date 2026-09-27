@@ -20,7 +20,7 @@ CHANNEL_COLORS = [
 def _read_all_samples(dev, capture_id, total_captured):
     """Runs on the worker thread (inside an invoke() callable): loops
     DIGITAL_CAPTURE_READ until every already-captured sample is fetched.
-    A single response is capped well under 1024 samples, so a full 1024-
+    A single response is capped well under 4096 samples, so a full 4096-
     sample ring needs several round trips."""
     chunk = 400
     offset = 0
@@ -122,7 +122,7 @@ class DigitalIOTab(QWidget):
 
         controls.addWidget(QLabel("Max samples (0=unbounded):"))
         self.max_samples_spin = QSpinBox()
-        self.max_samples_spin.setRange(0, 1024)
+        self.max_samples_spin.setRange(0, pc.DIGITAL_CAPTURE_BUFFER_SAMPLES)
         self.max_samples_spin.setValue(200)
         controls.addWidget(self.max_samples_spin)
 

@@ -47,6 +47,7 @@ typedef enum {
     STATUS_MALFORMED          = 5,
     STATUS_PAYLOAD_TOO_LARGE  = 6,
     STATUS_INTERNAL_ERROR     = 7,
+    STATUS_RESOURCE_BUSY      = 8, // pins currently owned by a debug-probe session
 } frame_status_t;
 
 // Full opcode set from the plan. See protocol.md's opcode table for exactly
@@ -77,6 +78,8 @@ typedef enum {
     OPCODE_SPI_SLAVE_CONFIG           = 22,
     OPCODE_PING                       = 23,
     OPCODE_RESET_TO_BOOTSEL           = 24,
+    OPCODE_SPI_SLAVE_READ             = 25, // added after the plan's original set
+    OPCODE_DEBUG_SESSION_EVENT        = 26, // EVENT-only (never a request): debug session start/end
 } opcode_t;
 
 typedef struct __attribute__((packed)) {
@@ -113,7 +116,7 @@ typedef struct __attribute__((packed)) {
     uint8_t i2c_slave_count;
     uint8_t uart_count;
     uint8_t adc_channel_count;
-    uint8_t reserved;
+    uint8_t debug_probe_ports; // bit0 SWD, bit1 JTAG -- set once each works (9.3/9.4)
 } capabilities_response_t;
 
 // GET_STATUS response payload.
@@ -137,6 +140,13 @@ typedef struct __attribute__((packed)) {
     // and every time this response is sent). ARM_OUTPUTS must echo the most
     // recently issued value back exactly, or it's rejected as stale/replayed.
     uint8_t  arm_challenge[16];
+    // CMSIS-DAP debug-probe session (debug_probe_design.md). Read-only here:
+    // sessions are started/ended by the DAP interface, never by this protocol.
+    uint8_t  debug_session_active;    // 0/1
+    uint8_t  debug_mode;              // 0 none, 1 SWD, 2 JTAG
+    uint8_t  debug_last_end_reason;   // 0 none, 1 disconnect, 2 inactivity timeout, 3 USB
+    uint8_t  reserved;
+    uint32_t debug_session_count;     // since boot
 } status_response_t;
 
 // ARM_OUTPUTS request payload.
@@ -457,8 +467,8 @@ typedef struct __attribute__((packed)) {
 // MISO continuously repeats a fixed 8-byte pattern (0x00..0x07) for as
 // long as the master keeps clocking — there is no opcode to set custom
 // slave response data (matches the plan's frozen opcode list, and
-// mirrors I2C_SLAVE_CONFIG's same limitation). MOSI is captured for
-// counting only, not remotely readable.
+// mirrors I2C_SLAVE_CONFIG's same limitation). MOSI is captured into the
+// RX ring and drained with SPI_SLAVE_READ.
 typedef struct __attribute__((packed)) {
     uint32_t bytes_received;
     uint32_t bytes_sent;        // NOT a count of bytes actually clocked out
@@ -471,3 +481,20 @@ typedef struct __attribute__((packed)) {
                                   // signal during sustained real activity.
     uint32_t transaction_count;  // CS falling-edge count since the previous call
 } spi_slave_config_response_t;
+
+// SPI_SLAVE_READ request payload. Drains bytes the slave captured on MOSI
+// since the last read (or since SPI_SLAVE_CONFIG enabled it). Only valid
+// while the slave is enabled -- disabling wipes the ring.
+typedef struct __attribute__((packed)) {
+    uint16_t max_bytes; // clamped to one response frame and to the ring size
+} spi_slave_read_request_t;
+
+// SPI_SLAVE_READ response payload, followed by returned_count raw bytes in
+// wire order (MSB-first per byte, as the master sent them).
+typedef struct __attribute__((packed)) {
+    uint32_t total_received;     // bytes captured since enable
+    uint32_t ring_overrun_count; // bytes overwritten in the RX ring before
+                                  // being read -- host polled too slowly
+    uint16_t returned_count;
+    uint16_t reserved;
+} spi_slave_read_response_t;

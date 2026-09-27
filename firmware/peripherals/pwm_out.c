@@ -29,6 +29,7 @@ static void release_to_pio(uint pin) {
     // pindirs/value registers were never touched while this pin was
     // diverted to PWM, so this alone restores correct digital-bank state.
     pio_gpio_init(pio0, pin);
+    digital_bank_reapply_input_enables(); // pio_gpio_init() turned IE back on (E9)
 }
 
 static uint32_t clamp_frequency_hz(uint32_t requested_hz) {
@@ -121,6 +122,7 @@ bool pwm_out_config(uint8_t channel, bool enabled, uint32_t frequency_hz,
     uint32_t level = ((uint32_t)duty_permille * ((uint32_t)wrap + 1u)) / 1000u;
 
     gpio_set_function(pin, GPIO_FUNC_PWM);
+    digital_bank_reapply_input_enables(); // gpio_set_function() turned IE back on (E9)
 
     if (!slice_freq_matches) {
         // Frequency change on a shared slice: brief disable is unavoidable

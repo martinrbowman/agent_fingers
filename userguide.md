@@ -1,415 +1,186 @@
-# User guide
+# Agent Fingers — User guide
 
-How to build, flash, and check the Agent Fingers firmware on a
-Raspberry Pi Pico 2. For design background see
-`rp2350_digital_signal_agent_plan.md`; for wire-protocol details see
-`protocol.md`.
+Agent Fingers turns a stock Raspberry Pi Pico 2 into a USB signal
+instrument and debug probe. This guide covers setting it up, every
+feature and how to use it — from Claude Code (MCP), the command line, the
+desktop GUI or Python — and how to use the board as a CMSIS-DAP debug
+probe.
+
+- [What you need](#what-you-need)
+- [Build and flash](#build-and-flash)
+- [Install the host tools](#install-the-host-tools)
+- [Check the board is alive](#check-the-board-is-alive)
+- [Pinout](#pinout)
+- [Ways to control the board](#ways-to-control-the-board)
+- [Safety: arming outputs](#safety-arming-outputs)
+- [Digital I/O](#digital-io-gp0-7)
+- [Digital capture](#digital-capture)
+- [PWM](#pwm)
+- [ADC](#adc-gp26-28)
+- [UART](#uart-gp16-gp17)
+- [I2C master and slave](#i2c-master-and-slave)
+- [SPI master and slave](#spi-master-and-slave)
+- [Events](#events)
+- [Using the board as a debug probe](#using-the-board-as-a-debug-probe)
+- [Specifications and limits](#specifications-and-limits)
+- [Checking your board with the test suite](#checking-your-board-with-the-test-suite)
+- [Troubleshooting](#troubleshooting)
 
 ## What you need
 
-- Raspberry Pi Pico 2 (non-W), connected over USB for the device itself.
-- Raspberry Pi Debug Probe (or a second Pico running debugprobe firmware),
-  wired to the target's SWD pins, connected over USB for programming.
-- Raspberry Pi Pico VSCode extension installed (this is what provides the
-  SDK/toolchain/openocd used below — no other setup needed).
+- A Raspberry Pi Pico 2 (non-W), connected to your computer over USB.
+- To flash it, either:
+  - a Raspberry Pi Debug Probe (or a second Pico running debugprobe
+    firmware) wired to the Pico 2's 3-pin DEBUG connector, or
+  - nothing extra: use the BOOTSEL button and the UF2 file.
+- The Raspberry Pi Pico VS Code extension, which installs the SDK,
+  toolchain and OpenOCD used below.
+- Python 3.10 or newer for the host tools.
 
-## Build
+## Build and flash
+
+Build:
 
 ```sh
 cd build
 cmake -G Ninja ..
 ninja
+cd ..
 ```
 
-Output: `build/agent_fingers.elf` / `.uf2`.
+This produces `build/agent_fingers.elf` and `build/agent_fingers.uf2`.
 
-## Flash
-
-Via the debug probe (recommended — also lets you catch a crash with a
-debugger later):
+**Flash with the Debug Probe:**
 
 ```sh
 ~/.pico-sdk/openocd/0.12.0+dev/openocd \
   -s ~/.pico-sdk/openocd/0.12.0+dev/scripts \
-  -f interface/cmsis-dap.cfg -f target/rp2350.cfg \
+  -f interface/cmsis-dap.cfg -c "cmsis-dap vid_pid 0x2e8a 0x000c" \
+  -f target/rp2350.cfg \
   -c "adapter speed 5000" \
   -c "program build/agent_fingers.elf verify reset exit"
 ```
 
-Don't use `/opt/homebrew/bin/openocd` if you have it installed — it's a
-different build without RP2350 support. Use the `.pico-sdk` one above.
+- Use the OpenOCD from `~/.pico-sdk`, not a Homebrew or apt one — those
+  don't support the RP2350.
+- The `cmsis-dap vid_pid` line selects the Raspberry Pi Debug Probe. The
+  board is itself a CMSIS-DAP probe, and without that line OpenOCD may
+  pick the board instead of the probe that flashes it.
+- In VS Code, the Flash and Debug tasks already do this through
+  `tools/openocd/debugprobe.cfg`.
 
-Alternative without a debug probe: hold BOOTSEL while plugging in the Pico,
-it mounts as a USB drive, drag `build/agent_fingers.uf2` onto it.
+**Flash without a probe:** hold BOOTSEL while plugging the Pico 2 in. It
+appears as a USB drive; copy `build/agent_fingers.uf2` onto it.
 
-## Checking it's alive
-
-After flashing, the board enumerates as a composite USB device (VID 0xCafe,
-PID 0x4001 — a development placeholder, not final) with two interfaces:
-
-1. **A CDC serial port** (`/dev/cu.usbmodem*` on macOS, `/dev/ttyACM*` on
-   Linux, a COM port on Windows) — open it with any terminal program. You'll
-   see one line on connect:
-   ```
-   agent_fingers 0.1.0 (<git hash>)
-   ```
-   This port is diagnostic-only; it doesn't speak the binary protocol.
-
-2. **A vendor-specific bulk interface** — this is where the real control
-   protocol lives (see `protocol.md`). It has no OS-level device file; you
-   need a USB library (pyusb, libusb, or the future host client) to talk to
-   it. There's no host client yet (that's step 7 of the plan), but a quick
-   manual check with Python + pyusb:
-   ```python
-   import usb.core, usb.util
-   dev = usb.core.find(idVendor=0xCafe, idProduct=0x4001)
-   intf = dev.get_active_configuration()[(2, 0)]
-   usb.util.claim_interface(dev, intf.bInterfaceNumber)
-   # build a GET_INFO frame per protocol.md and write to EP 0x03,
-   # read the response from EP 0x83
-   ```
-
-The onboard LED blinks fast (200ms) while USB is unconfigured, slow (1s)
-once the host has enumerated the device — a quick visual check that
-firmware booted and USB came up, no terminal needed.
-
-## Pinout (Pico 2, GP0-28)
-
-Frozen allocation — see `hardware/pin_claims.yaml` (machine-readable source
-of truth) and `rp2350_digital_signal_agent_plan.md` for the full rationale.
-`GP23-25`/`GP29` are board functions, not header pins to wire up.
-
-| GPIO    | Function                | Status |
-|---------|--------------------------|--------|
-| GP0-GP7 | Digital I/O bank (bidirectional, per-channel, PWM-capable) | **working** — see below |
-| GP8     | SPI master SCK          | mode 0 only, data transfer verified (master↔slave loopback); self-loop not yet — see below |
-| GP9     | SPI master MOSI         | mode 0 only, data transfer verified (master↔slave loopback); self-loop not yet — see below |
-| GP10    | SPI master MISO         | mode 0 only, data transfer verified (master↔slave loopback); self-loop not yet — see below |
-| GP11    | SPI master CS0_n        | mode 0 only, data transfer verified (master↔slave loopback); self-loop not yet — see below |
-| GP12    | SPI slave SCK           | mode 0 only, **working**, data transfer verified (master↔slave loopback) — see below |
-| GP13    | SPI slave MOSI          | mode 0 only, **working**, data transfer verified (master↔slave loopback) — see below |
-| GP14    | SPI slave MISO          | mode 0 only, **working**, data transfer verified (master↔slave loopback) — see below |
-| GP15    | SPI slave CS_n          | mode 0 only, **working**, data transfer verified (master↔slave loopback) — see below |
-| GP16    | UART TX                 | **working**, fully verified (loopback round-trip) — see below |
-| GP17    | UART RX                 | **working**, fully verified (loopback round-trip) — see below |
-| GP18    | I2C slave SDA           | **working**, data transfer verified (loopback round-trip); bus-timeout recovery not yet — see below |
-| GP19    | I2C slave SCL           | **working**, data transfer verified (loopback round-trip); bus-timeout recovery not yet — see below |
-| GP20    | I2C master SDA          | **working**, data transfer verified (loopback round-trip); bus-timeout recovery not yet — see below |
-| GP21    | I2C master SCL          | **working**, data transfer verified (loopback round-trip); bus-timeout recovery not yet — see below |
-| GP22    | Debug/scope trigger     | not implemented |
-| GP23-25 | *board function — do not use* | n/a |
-| GP26    | ADC0                     | **working** — see below |
-| GP27    | ADC1                     | **working** — see below |
-| GP28    | ADC2                     | **working** — see below |
-| GP29    | *board function (VSYS sense) — do not use* | n/a |
-
-**GP0-7 and GP26-28 are unconnected on a bare board.** An unconnected
-channel reads as noise, not a clean value — GP0-7 has a weak internal
-pull-down that's easily overridden by floating-pin coupling; GP26-28 (ADC)
-has no pull at all and will show a wandering raw code with nothing wired to
-it. Don't trust a read from a channel with nothing connected.
-
-## What the device can do right now
-
-Every opcode in the plan is now implemented: `GET_INFO`, `GET_CAPABILITIES`,
-`GET_STATUS`, `PING`, `ARM_OUTPUTS`, `DISARM_OUTPUTS`, `DIGITAL_READ`,
-`DIGITAL_WRITE_MASKED`, `DIGITAL_CAPTURE_START`, `DIGITAL_CAPTURE_STOP`,
-`DIGITAL_CAPTURE_READ`, `ADC_SCAN_CONFIG`, `ADC_SCAN_READ`, `PWM_CONFIG`,
-`UART_CONFIG`, `UART_WRITE`, `UART_READ`, `I2C_XFER`, `I2C_SLAVE_CONFIG`,
-`SPI_XFER`, `SPI_SLAVE_CONFIG` — the last two mode-0-only and not yet
-verified against real hardware, see below. Step 6 (peripherals) is
-code-complete; step 7 (host library + MCP server) hasn't started.
-
-Firmware size, for reference: ~46 KB flash (1.1% of the RP2350's 4 MB),
-~17 KB RAM (3.3% of 520 KB) — all static allocation, no headroom pressure
-at this point in the build.
-
-### Using the digital bank (GP0-7)
-
-All 8 channels boot as input/high-Z. Driving any of them requires arming
-first — this is a deliberate safety gate, not red tape (see plan's "Safety
-policy"):
-
-1. `GET_STATUS` → read the 16-byte `arm_challenge` field.
-2. `ARM_OUTPUTS` with that exact challenge, an `output_mask` (which of
-   GP0-7 to claim as output), and a `lease_ms` (defaults to 2000 if 0,
-   clamped to [100, 30000]).
-3. `DIGITAL_WRITE_MASKED` to drive values — only on channels within the
-   armed mask.
-4. `PING` periodically to renew the lease, or it expires and the bank snaps
-   back to input/high-Z on its own (`safe_state_reason` becomes
-   `host_lost` in the next `GET_STATUS`).
-5. `DISARM_OUTPUTS` when done — no challenge needed, always safe to call.
-
-`DIGITAL_READ` works regardless of arm state and returns the true pin
-level for every requested channel (for an armed/driven channel, that's a
-readback of what you're driving — for an input channel, the real
-electrical level, noise included).
-
-### PWM on a digital-bank channel
-
-No separate claim step — PWM reuses the arm/lease above directly:
-
-1. Arm the channel via `ARM_OUTPUTS` (above) like any other output.
-2. `PWM_CONFIG(channel, enabled=1, frequency_hz, duty_permille)` — channel
-   must be in the armed mask or this is rejected. `duty_permille` is 0-1000
-   (0.1% steps).
-3. `DIGITAL_WRITE_MASKED` on a PWM-active channel is rejected — the pad is
-   muxed to the PWM peripheral now, not the digital bank. Disable PWM first
-   (`PWM_CONFIG` with `enabled=0`) to get plain digital control back.
-4. GP0/1, GP2/3, GP4/5, GP6/7 each share one PWM slice's frequency — only
-   duty is independent per pin in a pair. Changing frequency on one member
-   of a pair silently changes what its sibling is actually outputting too,
-   even without touching the sibling directly. Give paired channels the
-   same frequency if you need both driven independently.
-5. Losing the arm lease (expiry, disarm, `PING` not sent in time, any
-   safe-state trigger) disables PWM and releases the pin, same as any other
-   armed output — verified on hardware, no stuck-driving state.
-
-Full wire layout for these opcodes is in `protocol.md`.
-
-### Capturing digital samples
-
-Continuous periodic sampling of all 8 channels, independent of arm state —
-works whether or not anything is armed as output, and can run at the same
-time as `DIGITAL_READ`/`DIGITAL_WRITE_MASKED`.
-
-1. `DIGITAL_CAPTURE_START` with a `rate_hz` (clamped to what's achievable at
-   the board's actual clock, up to 200000 Hz — provisional, not yet
-   validated against a logic analyzer) and `max_samples` (0 = runs until you
-   stop it; otherwise a bounded burst, capped at the 1024-sample ring).
-   Response gives you a `capture_id` — every following call must echo it.
-2. Poll `DIGITAL_CAPTURE_READ` with an `offset`/`limit` to page through
-   samples as they arrive. `offset` is an absolute sample index since START,
-   not a ring position — the wraparound is handled for you.
-3. For a bounded capture, an unsolicited EVENT frame arrives when it
-   auto-completes (`sequence=0` — that's the general marker for a frame
-   with no originating request). No need to poll just to find out if it's done.
-4. `DIGITAL_CAPTURE_STOP` ends an unbounded capture (or cancels a bounded
-   one early). The buffer stays readable afterward until a new START
-   replaces it.
-5. If you read too slowly and the 1024-sample ring wraps past your last
-   read position, `DIGITAL_CAPTURE_READ`'s `overrun_count` tells you how
-   many samples were lost — the read still returns the best data still
-   available rather than failing outright.
-
-### Reading the ADC (GP26-28)
-
-Same shape as digital capture, deliberately — round-robin sampling into a
-ring buffer, paged out via READ. No arming needed; this is a pure read
-path, nothing is ever driven.
-
-1. `ADC_SCAN_CONFIG` with a `channel_mask` (bits 0-2 = ADC0/1/2) and a
-   `rate_hz` — this is the *total* round-robin rate, not per-channel: with
-   3 channels selected, each individual channel is sampled at rate_hz/3.
-   `max_samples` works the same as digital capture (0 = unbounded, else a
-   bounded burst capped at 2048). Response includes `vref_millivolts`
-   (nominal 3.3V — not independently calibrated, there's no separate
-   precision reference on this board) — convert a raw code to volts
-   yourself: `volts = raw_code * vref_millivolts / 4096 / 1000`.
-2. Poll `ADC_SCAN_READ` with `offset`/`limit` to page through raw 12-bit
-   codes. Because each sample is 2 bytes (vs 1 for digital capture), a
-   512-byte frame only fits 242 samples per call, not 484 — page accordingly.
-3. Sample order is fixed: sample `i` belongs to the `(i % channel_count)`-th
-   selected channel in ascending order (0, 1, 2, 0, 1, 2, ...) — not tagged
-   per-sample, derive it from the index.
-4. `ADC_SCAN_CONFIG` with `channel_mask=0` stops the scan — there's no
-   separate stop opcode.
-5. Same overrun/bounded-completion/EVENT behavior as digital capture (the
-   EVENT here carries `opcode=ADC_SCAN_READ` instead).
-
-### Using UART0 (GP16 TX / GP17 RX)
-
-Not gated by `ARM_OUTPUTS` — it's a communication bus, not a static output
-level, so no arming needed.
-
-1. `UART_CONFIG(baud_rate, data_bits, stop_bits, parity)` first —
-   `UART_WRITE`/`UART_READ` before this return an error. Reconfiguring
-   resets the RX ring, read cursor, and error counters, and aborts any
-   in-flight TX.
-2. `UART_WRITE(data)` — the whole request payload is the bytes to send, no
-   wrapper fields. It's fire-and-forget: if a previous write's DMA
-   transfer is still draining (e.g. a big payload at a slow baud rate),
-   this is rejected rather than blocking the device or queuing — wait and
-   retry, or check via `UART_READ`.
-3. `UART_READ(max_bytes)` drains whatever's arrived since the last read —
-   no offset, it's a plain stream, not a paginated capture. The response
-   also carries cumulative framing/parity/break/overrun/ring-overrun error
-   counters, reset on the next `UART_CONFIG`.
-4. **Fully verified**, including actual byte-level TX/RX transfer: with a
-   GP16-to-GP17 loopback jumper, all 256 byte values round-trip
-   byte-identical with zero framing/parity/break/overrun errors
-   (`test_loopback_round_trip`). Also verified: pre-config rejection,
-   busy-rejection on a slow/large write, counters idle at zero,
-   counters/cursor reset on reconfigure.
-
-### Using I2C: master (GP20/21) and slave (GP18/19)
-
-Two independent roles on separate hardware — both can be active
-simultaneously. Neither is gated by `ARM_OUTPUTS`; both are buses. Fixed
-100kHz for now.
-
-**As master** (talking to an external I2C device):
-
-1. `I2C_XFER(address, write_len, read_len, timeout_ms, <write bytes>)` — a
-   combined write-then-read using a repeated start, covering the common
-   "write register pointer, read data back" pattern in one call.
-2. The opcode itself succeeds even if the I2C transaction fails — check
-   `write_status`/`read_status` in the response (`0`=ok, `1`=nack,
-   `2`=timeout). A NACK just means no device answered at that address;
-   that's a normal, expected outcome, not a protocol error.
-3. If the write phase fails, the read phase is skipped entirely — check
-   `write_status` before trusting `bytes_read`.
-4. A genuine timeout (not NACK) automatically runs a bus-recovery sequence
-   (GPIO bit-bang, up to 9 SCL pulses) before the response comes back, so
-   the bus is left clean for your next call either way.
-
-**As slave** (this board answers as an I2C device on the bus):
-
-1. `I2C_SLAVE_CONFIG(enabled=1, address)` sets up a 256-byte register-map
-   responder: whatever writes it, the first byte becomes a pointer
-   (auto-incrementing from there), matching the common EEPROM/sensor
-   convention — write pointer+data to store, write pointer then read to
-   fetch. There's no opcode to inspect the register map's contents
-   remotely; it only exists for an external master to interact with
-   over the physical bus.
-2. Call `I2C_SLAVE_CONFIG` again (same params or to disable) to
-   fetch-and-reset `bytes_received`/`bytes_sent`/`transaction_count` —
-   this also wipes the register map back to zero.
-
-**Verified**: NACK-on-nonexistent-address, read phase correctly skipped
-after a failed write, slave enable/disable/counter-reset, and — with
-GP20↔GP18 (SDA) and GP21↔GP19 (SCL) jumpered together (both sides already
-pull up internally, no external resistors needed) — a real
-master↔slave register-map round-trip (`test_register_map_round_trip`):
-write a payload, reposition the pointer, read it back byte-identical.
-**Not yet verified**: genuine bus-timeout recovery — needs a deliberately
-stuck bus, not just a loopback jumper.
-
-### Using SPI: master (GP8-11) and slave (GP12-15)
-
-Not gated by `ARM_OUTPUTS`. **Mode 0 (CPOL=0, CPHA=0) only, both roles** —
-modes 1-3 return an error.
-
-**As master:**
-
-1. `SPI_XFER(mode=0, hz, len, <tx bytes>)` — full-duplex, one length for
-   both directions. If you want more bytes back than you have real data to
-   send, pad your TX buffer with `0x00` dummy bytes to reach the length you
-   want — the standard `spi_transfer(tx, rx, len)` convention (same as
-   Arduino's `SPI.transfer`, Linux `spidev`, etc.).
-2. It's blocking — the response only comes back once the whole transfer
-   (and its RX data) is ready, unlike UART's fire-and-forget writes. `hz`
-   is clamped to [10000, 1000000]; the floor is a deliberate safety margin
-   on response time, not a hardware limit.
-3. Framing is true MSB-first on the wire, same as virtually every real SPI
-   device expects.
-
-**As slave:**
-
-1. `SPI_SLAVE_CONFIG(enabled=1)` starts it — no address or mode field (mode
-   0 is hardcoded). MISO continuously repeats a fixed 8-byte pattern
-   (`0x00..0x07`) for as long as a master keeps clocking; there's no
-   opcode to set custom response data. MOSI is captured only for counting
-   (`bytes_received` in the response), not remotely readable.
-2. Call `SPI_SLAVE_CONFIG` again (same params, or to disable) to
-   fetch-and-reset `bytes_received`/`bytes_sent`/`transaction_count`.
-   Note: `bytes_sent` is *not* a real transmitted-byte count — it reads a
-   stable ~5 even at idle (the TX DMA pipeline gets pre-filled on enable
-   regardless of real activity); only trust it as a rough "more than ~5
-   bytes consumed" signal during sustained real use.
-3. CS isn't gated in the slave's PIO program — it relies on the connected
-   master not toggling SCK while this slave is deselected, standard
-   SPI etiquette. MISO isn't tri-stated when deselected either, so this
-   slave isn't meant to share a bus with other slaves. One consequence:
-   if the slave's state machine happens to still be mid-loop from idle
-   noise when a real transfer's first clock edge arrives, that transfer's
-   captured *data* can come back shifted by exactly one bit (byte
-   *counts* stay exact regardless) — happens about 1 in 8 tries. Retry
-   the transfer if you hit this; a real fix means adding CS-wait framing
-   to the slave's PIO program, not done yet.
-
-**Master↔slave data transfer is fully verified** (GP8↔GP12, GP9↔GP13,
-GP10↔GP14, GP11↔GP15 jumpered): the master reads back the slave's real
-`0x00..0x07` pattern byte-identical, and both sides' byte counters are
-exact — including for transfers whose length exactly matches the
-256-byte RX ring, an edge case that found a real counting bug (see
-handoff.md). This hardware bring-up found and fixed five real firmware
-bugs along the way. **Not yet independently verified**: a true master
-self-loop — jumper GP9↔GP10 (MOSI↔MISO), send known bytes, confirm they
-read back identical. The master's own TX/RX bit path is already proven
-correct via the slave round-trip, but that's not quite the same test.
-
-## Host library, MCP server, and CLI
-
-Everything above talks to the device with raw USB frames. There's now a
-real Python layer on top: `device.Device` (typed client, one method per
-opcode), an MCP server (`rp2350-signal-mcp`) for agent use, and a CLI
-(`rp2350-signal-cli`) for bench/operator use — both built on the same
-`Device` library.
-
-### Install
+## Install the host tools
 
 ```sh
 host/setup.sh
 ```
 
-Creates a venv at `host/.venv` (reused if it already exists), installs
-`host/` in editable mode plus pytest, and prints usage. Re-run anytime
-after pulling new commits to stay current. Custom venv location:
+This creates a Python virtual environment at `host/.venv` and installs the
+Python library, the command-line tool and the MCP server into it. Re-run
+it after pulling new versions. To put the environment elsewhere:
 `RP2350_SIGNAL_VENV=/path/to/venv host/setup.sh`.
 
-Equivalent by hand:
-```sh
-python3 -m venv .venv        # anywhere outside the repo is fine too
-.venv/bin/pip install -e host/
-```
-
-Either way this pulls in `pyusb` and the official `mcp` SDK (2.x) and
-installs both console scripts into the venv's `bin/`.
-
-### CLI
+For the GUI as well:
 
 ```sh
-.venv/bin/rp2350-signal-cli list          # attached device serials
-.venv/bin/rp2350-signal-cli info
-.venv/bin/rp2350-signal-cli status
-.venv/bin/rp2350-signal-cli arm 0x03 --lease-ms 5000
-.venv/bin/rp2350-signal-cli digital-write 0x01 0x01
-.venv/bin/rp2350-signal-cli digital-read
-.venv/bin/rp2350-signal-cli disarm
-.venv/bin/rp2350-signal-cli i2c-xfer 0x50 --write-hex 00 --read-length 4
-.venv/bin/rp2350-signal-cli spi-xfer aabbccdd
+host/gui/setup.sh
 ```
 
-Pass `--device SERIAL` (before the subcommand) to select a specific board
-if more than one is attached — the library refuses to silently pick one
-for you. Run `rp2350-signal-cli <subcommand> --help` for full options; not
-every opcode has a subcommand yet (digital capture and ADC scan aren't
-wired into the CLI, only the MCP server — reach them via a short Python
-script using `device.Device` directly if you need them from the bench).
+## Check the board is alive
 
-### Claude Code (MCP)
+- **LED:** blinks fast (every 200 ms) until the computer has set up USB,
+  then slowly (every second).
+- **Command line:**
+  ```sh
+  host/.venv/bin/rp2350-signal-cli list     # attached boards (serial numbers)
+  host/.venv/bin/rp2350-signal-cli info     # firmware version and board ID
+  ```
+- **Diagnostic console:** the board also appears as a serial port
+  (`/dev/cu.usbmodem*` on macOS, `/dev/ttyACM*` on Linux, a COM port on
+  Windows). Open it in any terminal program to see:
+  ```
+  agent_fingers 0.1.0 (<git hash>)
+  debug probe: SWD max 6818 kHz, JTAG max 4687 kHz (bit-bang, measured)
+  ```
+  The console is information only; it doesn't accept commands.
 
-The MCP server exposes 22 tools (device info/status, digital I/O, capture,
-ADC, PWM, UART, I2C, SPI) over stdio. **Every write-capable tool is
-disabled by default** — this is a deliberate MCP-layer policy, separate
-from and in addition to the firmware's own arm/lease enforcement (which
-only covers digital/PWM outputs; UART/I2C/SPI aren't gated by the
-firmware at all, only by this policy):
+The board is a USB composite device (VID `0xCAFE`, PID `0x4001`, a
+development ID) with three functions: the diagnostic serial console, the
+control channel used by the host tools, and a CMSIS-DAP v2 debug probe.
+
+**Windows:** no driver installation or Zadig step is needed; the board
+tells Windows to use its built-in WinUSB driver. (Not yet tried on a
+Windows machine.)
+
+**Reset cause after flashing:** after a flash through OpenOCD, the
+board's status shows reset cause 2 ("core1 stall"). This is expected:
+OpenOCD resets the RP2350's two cores one after the other, and the
+firmware reboots the chip to recover cleanly.
+
+## Pinout
+
+| GPIO (header pin) | Function |
+|---|---|
+| GP0-GP7 (1, 2, 4-7, 9, 10) | Digital I/O bank, channels 0-7 (input/output per channel, PWM-capable) |
+| GP8 (11) | SPI master SCK · debug SWCLK / TCK |
+| GP9 (12) | SPI master MOSI · debug SWDIO / TDI |
+| GP10 (14) | SPI master MISO · debug SWO / TDO |
+| GP11 (15) | SPI master CS · debug SWD nRESET / JTAG TMS |
+| GP12 (16) | SPI slave SCK |
+| GP13 (17) | SPI slave MOSI |
+| GP14 (19) | SPI slave MISO |
+| GP15 (20) | SPI slave CS |
+| GP16 (21) | UART TX |
+| GP17 (22) | UART RX |
+| GP18 (24) | I2C slave SDA |
+| GP19 (25) | I2C slave SCL |
+| GP20 (26) | I2C master SDA |
+| GP21 (27) | I2C master SCL |
+| GP22 (29) | Debug JTAG nRESET |
+| GP26 (31) | ADC channel 0 |
+| GP27 (32) | ADC channel 1 |
+| GP28 (34) | ADC channel 2 |
+| GP23-25, GP29 | Used by the Pico 2 board itself — don't connect |
+
+GP8-11 belong to the SPI master normally, and to the debug probe while a
+debug session is open.
+
+**Electrical notes**
+- 3.3 V logic only. Don't connect 5 V signals directly.
+- Unconnected inputs float. GP0-7 have a weak internal pull-down, but the
+  Pico 2's RP2350 (A2 revision) has a known issue (erratum E9) where an
+  input can stick at about 2.2 V after being driven high. The firmware
+  avoids it by keeping each input switched off except while it's being
+  read, so outputs you release drop back low. If a channel must read a
+  reliable low with nothing driving it, fit an external pull-down of
+  8.2 kΩ or less.
+- The ADC inputs have no pull at all and show a wandering value with
+  nothing connected.
+
+## Ways to control the board
+
+Every feature is available four ways. They all use the same USB control
+channel, and only one program can hold it at a time.
+
+**Claude Code (MCP).** Add the MCP server with an absolute path to the
+virtual environment's binary:
 
 ```sh
-claude mcp add rp2350-signal /absolute/path/to/.venv/bin/rp2350-signal-mcp -- --device YOUR_SERIAL
+claude mcp add rp2350-signal /absolute/path/to/host/.venv/bin/rp2350-signal-mcp -- --device YOUR_SERIAL
 ```
 
-Or add it manually to your MCP config (`.mcp.json` or Claude Code's
-settings, depending on scope):
+`--device` can be left out when only one board is attached. Write-capable
+tools are disabled by default; to enable them, configure the server with
+an `env` block in your MCP config (`.mcp.json` or Claude Code settings):
 
 ```json
 {
   "mcpServers": {
     "rp2350-signal": {
-      "command": "/absolute/path/to/.venv/bin/rp2350-signal-mcp",
+      "command": "/absolute/path/to/host/.venv/bin/rp2350-signal-mcp",
       "args": ["--device", "YOUR_SERIAL"],
       "env": {
         "RP2350_SIGNAL_ALLOW_WRITES": "1",
@@ -420,89 +191,472 @@ settings, depending on scope):
 }
 ```
 
-`--device` is optional if exactly one board is attached, but always pass
-it once you have more than one — get the serial from `rp2350-signal-cli
-list` or `device_info`. Use an **absolute path** to the venv's binary;
-Claude Code doesn't activate your shell's venv for you.
+| Setting | Effect |
+|---|---|
+| `RP2350_SIGNAL_ALLOW_WRITES=1` | Enables the write-capable tools. Without it the server is read-only. |
+| `RP2350_SIGNAL_I2C_ALLOWLIST=0x50,0x68` | I2C addresses `i2c_xfer` may talk to. Required in addition to the write setting. |
+| `RP2350_SIGNAL_AUDIT_LOG=/path/file.jsonl` | Where the audit log goes (default `~/.rp2350-signal-agent/audit.jsonl`). One JSON line per tool call. |
 
-**Policy environment variables** (set in the `env` block above, not as
-shell exports — the MCP client launches this as a fresh subprocess):
-- `RP2350_SIGNAL_ALLOW_WRITES=1` — required for any tool that changes
-  device state (arming, digital/PWM/UART/I2C/SPI writes, slave config).
-  Omit it to run fully read-only (status/info/digital_read/adc_scan/
-  digital_capture/uart_read all still work).
-- `RP2350_SIGNAL_I2C_ALLOWLIST=0x50,0x68` — comma-separated hex addresses
-  `i2c_xfer` is permitted to talk to. Required in addition to the write
-  gate; an address not listed here is blocked even with writes enabled.
-- `RP2350_SIGNAL_AUDIT_LOG=/path/to/file.jsonl` — overrides the audit log
-  location (default `~/.rp2350-signal-agent/audit.jsonl`). One JSON line
-  per tool call: timestamp, tool name, parameters, and outcome.
+These must be in the server's `env` block — setting them in your shell
+has no effect, because the MCP client starts the server itself.
 
-Diagnostics go to stderr only — stdout is the JSON-RPC channel and must
-stay clean, so don't route `print()` output there if you extend this server.
+The 23 tools:
 
-## GUI
+| Area | Always available | Need `ALLOW_WRITES` |
+|---|---|---|
+| Device | `device_info`, `device_capabilities`, `device_status`, `device_ping` | |
+| Digital I/O | `digital_read`, `outputs_disarm` | `outputs_arm`, `digital_write` |
+| Capture | `digital_capture_start`, `digital_capture_read`, `digital_capture_stop` | |
+| ADC | `adc_scan_start`, `adc_scan_read`, `adc_scan_stop` | |
+| PWM | | `pwm_set` |
+| UART | `uart_read` | `uart_config`, `uart_write` |
+| I2C | | `i2c_xfer`, `i2c_slave_config` |
+| SPI | `spi_slave_read` | `spi_xfer`, `spi_slave_config` |
 
-A standalone PySide6 app for driving the board by hand -- generate and
-capture signals on every bus without writing Python.
+**Command line.** `host/.venv/bin/rp2350-signal-cli` has these commands:
+`list`, `info`, `status`, `ping`, `arm`, `disarm`, `digital-write`,
+`digital-read`, `pwm`, `uart-config`, `uart-write`, `uart-read`,
+`i2c-xfer`, `spi-xfer`. Put `--device SERIAL` before the command when more
+than one board is attached, and use `<command> --help` for options.
+Digital capture, ADC scans and the slave modes aren't in the CLI yet — use
+MCP, the GUI or Python for those.
 
 ```sh
-host/gui/setup.sh
-host/.venv/bin/rp2350-signal-gui
+rp2350-signal-cli arm 0x03 --lease-ms 5000
+rp2350-signal-cli digital-write 0x01 0x01
+rp2350-signal-cli digital-read
+rp2350-signal-cli i2c-xfer 0x50 --write-hex 00 --read-length 4
+rp2350-signal-cli spi-xfer aabbccdd
 ```
 
-Pick your board from the device dropdown, hit Connect. The top bar arms
-GP0-7 as outputs (pick a mask + lease, hit Arm) -- do this before writing
-digital pins or configuring PWM, same challenge/lease rule as everywhere
-else in this project. One tab per bus:
+**GUI.** `host/.venv/bin/rp2350-signal-gui`. Pick the board from the
+dropdown and click Connect. The top bar arms outputs (mask and lease).
+There's a tab per feature: Digital I/O (read/write plus capture with a
+live waveform), PWM, UART, I2C, SPI and ADC (live millivolt plot).
 
-- **Digital I/O** -- per-pin write/read, plus a rate-paced capture with a
-  live waveform plot. Set a sample rate and max-sample count (0 = runs
-  until you hit Stop), click Start.
-- **PWM** -- pick a channel (must already be armed as output), frequency,
-  duty cycle.
-- **UART** -- configure baud/format, write and read hex payloads.
-- **I2C** -- master transfers (address/write-data/read-length) and
-  slave-mode enable with live byte/transaction counters.
-- **SPI** -- master transfers and slave-mode enable, Mode 0 only
-  (matches the firmware -- there's no mode selector to get wrong).
-- **ADC** -- round-robin scan across ADC0-2 with a live millivolts plot.
+**Python.** The library the other three are built on:
 
-## Running the test suite against your board
+```python
+from device import Device
+
+with Device() as dev:                      # Device(serial="...") with several boards
+    print(dev.get_info())
+    dev.arm_outputs(0b0000_0001, lease_ms=5000)
+    dev.digital_write_masked(0b0000_0001, 0b0000_0001)   # GP0 high
+    print(dev.digital_read(0xFF))
+    dev.disarm_outputs()
+```
+
+Errors from the board raise `device.DeviceStatusError`, whose `.status`
+says why (for example 8 = resource busy).
+
+## Safety: arming outputs
+
+The board never drives a pin by surprise.
+
+- All 8 digital channels start as inputs (high impedance).
+- To drive any of them — as digital outputs or PWM — you first **arm**
+  them, naming which channels and for how long (the lease, 100 ms to
+  30 s, 2 s by default). The host tools handle the one-time challenge
+  code this needs automatically.
+- Keep the lease alive with `ping` (or any tool call that pings). If it
+  lapses, every output returns to input on its own.
+- **Disarm** whenever you're done. It never needs permission.
+- The board also drops every output to its safe state on watchdog
+  timeout, host loss or a protocol fault.
+- The UART, I2C and SPI buses aren't armed — they're communication links,
+  not static outputs — but their MCP tools are still off unless writes are
+  enabled.
+- The debug probe is the one deliberate exception: a debugger drives
+  GP8-11 (and GP22 in JTAG mode) directly, with no arming or MCP step,
+  because debugging must work on its own. See
+  [the debug probe section](#using-the-board-as-a-debug-probe).
+
+## Digital I/O (GP0-7)
+
+Eight channels, each an input or an output.
+
+- **Read:** `digital_read(mask)` returns the level of the requested
+  channels. Works whether or not anything is armed; for an output it
+  reads back what's being driven.
+- **Write:** arm the channels, then `digital_write_masked(mask, values)`
+  sets the masked channels to the given levels. Writing a channel that
+  isn't armed is refused.
+- **Release:** `disarm_outputs()`, or let the lease run out.
+
+## Digital capture
+
+Samples all 8 channels at a fixed rate into a 4,096-sample buffer. It runs
+independently of reads and writes, armed or not.
+
+1. **Start:** `digital_capture_start(rate_hz, max_samples)`. The rate goes
+   up to 200 kHz. `max_samples` 0 captures until you stop it; otherwise it
+   takes that many samples (up to 4,096) and stops by itself. You get back
+   a `capture_id`.
+2. **Read:** `digital_capture_read(capture_id, offset, limit)` returns
+   samples from absolute position `offset`. Each sample is one byte, bit N
+   = channel N. The whole buffer fits in one read.
+3. **Stop:** `digital_capture_stop()` ends a continuous capture or cancels
+   a bounded one. The data stays readable until the next start.
+4. A bounded capture sends a completion [event](#events) when it finishes.
+5. If you read too slowly and the buffer wraps, the read reports how many
+   samples were lost (`overrun_count`) and returns what's still there.
+
+Sample times follow from the rate: sample *i* was taken at
+`start_timestamp_us + i / rate_hz`.
+
+## PWM
+
+PWM output on any digital channel, up to 100 kHz, with duty in 0.1% steps.
+
+1. Arm the channel.
+2. `pwm_config(channel, enabled=True, frequency_hz, duty_permille)` —
+   `duty_permille` is 0-1000.
+3. While PWM is on, plain digital writes to that channel are refused.
+   Turn PWM off (`enabled=False`) to get normal control back.
+
+Channels pair up — GP0/1, GP2/3, GP4/5, GP6/7 — and each pair shares one
+frequency. Duty is independent per channel. Changing the frequency on one
+channel of a pair changes its partner's frequency too. Losing the lease
+turns PWM off and releases the pin like any other output.
+
+## ADC (GP26-28)
+
+Three 12-bit analog inputs, sampled round-robin into a 2,048-sample
+buffer. Nothing is driven, so no arming.
+
+1. **Start:** `adc_scan_config(channel_mask, rate_hz, max_samples)` —
+   bits 0-2 of the mask select ADC0-2. `rate_hz` is the total rate across
+   all selected channels (up to 200 kHz), so each channel gets
+   `rate_hz / channels`. `max_samples` works as for digital capture (up
+   to 2,048). The reply includes `scan_id` and `vref_millivolts`.
+2. **Read:** `adc_scan_read(scan_id, offset, limit)` returns raw codes
+   (0-4095). Samples cycle through the selected channels in order: with
+   channels 0 and 2 selected, samples go 0, 2, 0, 2, …
+3. **Convert:** `volts = code * vref_millivolts / 4096 / 1000`. The
+   reference is the nominal 3.3 V supply, not a calibrated reference.
+4. **Stop:** `adc_scan_config` with `channel_mask=0` (or the MCP tool
+   `adc_scan_stop`).
+
+Buffer wrap and completion events work as for digital capture.
+
+## UART (GP16, GP17)
+
+A serial port: TX on GP16, RX on GP17.
+
+1. **Configure:** `uart_config(baud_rate, data_bits=8, stop_bits=1,
+   parity=0)` — data bits 5-8, stop bits 1-2, parity 0 = none, 1 = even,
+   2 = odd. This also clears the receive buffer and error counters.
+2. **Send:** `uart_write(data)` sends in the background. If a previous
+   send is still going out, it's refused rather than queued — wait and
+   retry.
+3. **Receive:** `uart_read(max_bytes)` returns everything received since
+   the last read, plus running counts of framing, parity, break and
+   overrun errors, and of bytes lost because the receive buffer filled up
+   between reads.
+
+## I2C master and slave
+
+Two independent I2C ports, usable at the same time, both at 100 kHz. The
+Pico's internal pull-ups are enabled on both.
+
+**Master (GP20 SDA, GP21 SCL)** — talk to an external I2C device:
+
+- `i2c_xfer(address, write_data, read_len, timeout_ms)` writes, then reads
+  back, in one transaction with a repeated start — the usual "set register
+  pointer, read value" pattern.
+- Check the result's `write_status` and `read_status`: 0 = OK, 1 = no
+  acknowledge (nothing at that address — a normal outcome), 2 = timeout.
+  If the write fails, the read is skipped.
+- On a timeout the board automatically frees a stuck bus (clocking SCL up
+  to 9 times) before replying.
+- Through MCP, the address must be on `RP2350_SIGNAL_I2C_ALLOWLIST`.
+
+**Slave (GP18 SDA, GP19 SCL)** — the board answers as an I2C device:
+
+- `i2c_slave_config(enabled=True, address)` makes the board respond at
+  that address with a 256-byte register map. The first byte a master
+  writes sets the register pointer, which then auto-increments — like a
+  typical EEPROM or sensor.
+- Calling `i2c_slave_config` again returns byte and transaction counts
+  and clears the register map.
+
+## SPI master and slave
+
+Two SPI ports, both **Mode 0** (clock idles low, data sampled on the rising
+edge), MSB first.
+
+**Master (GP8 SCK, GP9 MOSI, GP10 MISO, GP11 CS):**
+
+- `spi_xfer(tx_data, hz)` is full-duplex: the reply holds as many bytes as
+  you sent. To read more than you have to send, pad with `0x00`.
+- Clock from 10 kHz to 1 MHz.
+- The call returns when the whole transfer is done.
+- While a debug session is open, the debug probe owns these pins and
+  `spi_xfer` returns status 8 (resource busy) — including a transfer that
+  was running when the session started. It works again when the session
+  ends.
+
+**Slave (GP12 SCK, GP13 MOSI, GP14 MISO, GP15 CS)** — the board acts as an
+SPI device, which also makes it an SPI **bus sniffer**:
+
+- `spi_slave_config(enabled=True)` starts it. Its MISO repeats the bytes
+  `0x00`–`0x07` for as long as the master clocks.
+- `spi_slave_read(max_bytes)` returns what the master sent on MOSI since
+  the last read — for example to watch a target's SPI flash traffic while
+  debugging it. The buffer holds 256 bytes; read at least that often, or
+  the oldest bytes are dropped and counted in `ring_overrun_count`.
+- Calling `spi_slave_config` again returns byte and transaction counts
+  (a transaction = one CS falling edge) and clears the buffer. The
+  `bytes_sent` figure is approximate (it reads about 5 even when idle).
+- Limitations: the slave doesn't wait for CS before sampling, so
+  occasionally (roughly 1 transfer in 8) a transfer's data comes back
+  shifted by one bit — retry if the data looks wrong. MISO is always
+  driven, so the slave can't share a bus with other slaves.
+
+**Wiring the master to the slave for a self-test:** jumper GP8↔GP12,
+GP9↔GP13, GP10↔GP14, GP11↔GP15. Never jumper GP9↔GP10 while GP10↔GP14 is
+fitted — two outputs would be shorted together.
+
+## Events
+
+Some things happen without a request, and the board announces them:
+
+- a bounded digital capture finished,
+- a bounded ADC scan finished,
+- a debug session started or ended.
+
+From Python, `dev.poll_event(timeout)` returns the next one (or `None`);
+`device.parse_debug_session_event()` decodes the debug-session ones.
+
+## Using the board as a debug probe
+
+The board is a CMSIS-DAP v2 debug probe for SWD and JTAG targets, with SWO
+trace capture. Debug tools use it directly — no MCP, CLI or Python step
+needed — and the rest of the board keeps working meanwhile, so an agent
+can watch a target's signals while you step through its code.
+
+| Feature | Support |
+|---|---|
+| SWD | Up to 6.8 MHz (about 266 KiB/s memory reads through OpenOCD) |
+| JTAG | Up to 4.7 MHz; raw TAP access (e.g. ESP32, FPGAs) and ARM over JTAG |
+| SWO trace | UART (NRZ) mode, up to 18.75 Mbaud, 4 KiB buffer |
+| Target voltage | 3.3 V only (no level shifting or target-voltage sensing) |
+| Reset | nRESET pin (open-drain) |
+| Not supported | Manchester SWO, SWO streaming, UART-over-DAP, atomic/queued commands, target-specific reset sequences |
+
+Requested clock rates above the limits run at the limit; the probe never
+runs faster than asked.
+
+### Tools
+
+- **Tested:** OpenOCD (SWD, JTAG, SWO), pyOCD (SWD and ARM over JTAG),
+  Espressif's `openocd-esp32` (ESP32 over JTAG).
+- **Should work** (not yet tried): probe-rs, Keil µVision/MDK, IAR,
+  NXP MCUXpresso, and STM32CubeIDE through its OpenOCD debug
+  configuration with a custom script.
+- **Won't work:** tools that only accept their own vendor's probes
+  (STM32CubeProgrammer, MPLAB X, SEGGER tools).
+
+Select the board by its USB ID so the tool doesn't pick another probe:
+`cmsis-dap vid_pid 0xcafe 0x4001` in OpenOCD, `-u <board serial>` in pyOCD
+(`pyocd list` shows the serial).
+
+### Debug sessions
+
+- A session starts when the debug tool connects. The probe then takes
+  GP8-11 (and GP22 in JTAG mode) from the SPI master — immediately, even
+  if an SPI transfer is running.
+- It ends when the tool disconnects or exits, after 10 seconds without
+  debugger traffic (e.g. a tool that crashed), or if USB is unplugged.
+  The pins then go back to the SPI master.
+- Everything else — digital I/O, capture, ADC, UART, I2C, SPI slave —
+  keeps working during a session. Disarming outputs or a lease running out
+  doesn't affect it.
+- The board's status (`device_status` in MCP) shows whether a session is
+  open, its mode and how the last one ended, and an [event](#events) is
+  sent at the start and end.
+- Between sessions the probe's pins are high impedance.
+
+### SWD wiring and use
+
+Take any jumpers off GP8-11 first.
+
+| Board pin (header) | Target |
+|---|---|
+| GP8 (11) | SWCLK |
+| GP9 (12) | SWDIO |
+| GP11 (15) | nRESET |
+| GP10 (14) | SWO (optional, for trace) |
+| GND | GND |
+
+OpenOCD, for an STM32F1:
+
+```sh
+~/.pico-sdk/openocd/0.12.0+dev/openocd \
+  -s ~/.pico-sdk/openocd/0.12.0+dev/scripts \
+  -f interface/cmsis-dap.cfg -c "cmsis-dap vid_pid 0xcafe 0x4001" \
+  -c "transport select swd" -f target/stm32f1x.cfg \
+  -c "reset_config srst_only srst_nogate connect_assert_srst" \
+  -c "adapter speed 4000"
+```
+
+The `reset_config` line connects with the target held in reset, which is
+needed when the target's firmware sleeps or reconfigures its debug pins.
+
+pyOCD:
+
+```sh
+pyocd commander -u <board serial> -t cortex_m -O connect_mode=under-reset \
+  -c "read32 0xE000ED00" -c halt -c "reg pc sp" -c go
+```
+
+pyOCD's built-in target list doesn't cover every chip (for example the
+STM32F103RB); `-t cortex_m` works for halting, registers and memory.
+
+### SWO trace
+
+SWO needs SWD mode and the SWO wire (GP10). With OpenOCD's TPIU commands,
+for an STM32F1 running on its 8 MHz reset clock:
+
+```sh
+... -c init -c "reset halt" \
+    -c "stm32f1x.tpiu configure -protocol uart -output swo.bin -traceclk 8000000 -pin-freq 2000000" \
+    -c "stm32f1x.tpiu enable" -c "itm port 0 on"
+```
+
+`swo.bin` receives raw ITM packets — for example `0x01` followed by the
+byte, for each byte written to stimulus port 0. `-traceclk` must match the
+target's actual core clock.
+
+### JTAG wiring and use
+
+**ESP32** (use Espressif's `openocd-esp32`, installed with ESP-IDF):
+
+| Board pin (header) | JTAG | ESP32 (30-pin DevKit label) |
+|---|---|---|
+| GP8 (11) | TCK | GPIO13 (D13) |
+| GP9 (12) | TDI | GPIO12 (D12) |
+| GP10 (14) | TDO | GPIO15 (D15) |
+| GP11 (15) | TMS | GPIO14 (D14) |
+| GP22 (29) | nRESET | EN |
+| GND | GND | GND |
+
+```sh
+openocd -s <openocd-esp32>/share/openocd/scripts \
+  -f interface/cmsis-dap.cfg -c "cmsis-dap vid_pid 0xcafe 0x4001" \
+  -c "transport select jtag" -c "set ESP32_FLASH_VOLTAGE 3.3" \
+  -f target/esp32.cfg
+```
+
+- Power the ESP32 from its own USB and connect only GND between the
+  boards.
+- The ESP32's application must leave GPIO12-15 free — they're the JTAG
+  pins. An application that uses them stops JTAG from working a moment
+  after reset. ESP-IDF's `hello_world` example leaves them alone.
+- GPIO12 also selects the ESP32's flash voltage at reset. The probe keeps
+  TDI low whenever it isn't shifting data, and holds it low for 2 ms as it
+  releases EN, so resets through the probe boot normally.
+
+**ARM chips over JTAG** — e.g. an STM32F103 with `transport select jtag`
+and `target/stm32f1x.cfg`, wired TCK→PA14, TDI→PA15, TDO←PB3, TMS→PA13,
+GP22→NRST. pyOCD's JTAG mode only handles chips with a single JTAG device
+in the chain, so for chips that also have a boundary-scan device (STM32F1
+does) use OpenOCD, or SWD.
+
+### Nucleo boards
+
+To debug the Nucleo's own microcontroller with this probe, **remove both
+CN2 jumpers** (they connect the on-board ST-LINK to the debug lines) and
+wire to the microcontroller's pins on the morpho headers. CN4 is the
+ST-LINK's output for debugging *other* boards, not a way into the
+Nucleo's own chip. For the Nucleo-F103RB: SWDIO CN7-13, SWCLK CN7-15,
+NRST CN7-14, SWO CN10-31, GND CN7-19.
+
+## Specifications and limits
+
+| | |
+|---|---|
+| Digital capture | Up to 200 kHz, 8 channels, 4,096-sample buffer |
+| ADC | 3 channels, 12-bit, up to 200 kHz total, 2,048-sample buffer |
+| PWM | Up to 100 kHz, duty in 0.1% steps; pairs share frequency |
+| UART | 5-8 data bits, 1-2 stop bits, none/even/odd parity |
+| I2C | 100 kHz, master and slave, internal pull-ups |
+| SPI | Mode 0 only; master 10 kHz-1 MHz; slave capture buffer 256 bytes |
+| Output lease | 100 ms-30 s (default 2 s) |
+| Debug probe | SWD ≤ 6.8 MHz, JTAG ≤ 4.7 MHz, SWO UART ≤ 18.75 Mbaud |
+| Logic level | 3.3 V |
+
+The capture, ADC, PWM and SPI master limits are conservative settings
+chosen to keep the board responsive, not hardware maximums.
+
+**Known limitations**
+- SPI supports Mode 0 only, in both roles.
+- The SPI slave can occasionally return a transfer shifted by one bit
+  (see [SPI](#spi-master-and-slave)).
+- I2C runs at 100 kHz only.
+- I2C bus recovery after a timeout hasn't been tested against a genuinely
+  stuck bus.
+- The digital capture rate hasn't been checked against a logic analyzer.
+
+## Checking your board with the test suite
+
+The repository includes a hardware test suite. It needs exclusive use of
+the board, so close the MCP server, CLI and GUI first.
 
 ```sh
 host/setup.sh
 host/.venv/bin/pytest tests/integration/ --device YOUR_SERIAL
 ```
 
-`--device` is optional if only one board is plugged in. 51 tests exercise
-every opcode plus a malformed-frame fuzz campaign; takes under 20s.
-`-m "not slow"` skips the cycling/stress tests for a quick pass. Needs an
-exclusive USB claim on the device — close the MCP server, CLI, or any
-other client first, or the run will fail to connect.
+`--device` is optional with one board attached. It takes about 30 s;
+`-m "not slow"` skips the longer stress tests.
+
+Some tests need jumpers, and fail without them:
+- UART: GP16↔GP17.
+- I2C: GP20↔GP18 and GP21↔GP19.
+- SPI master↔slave: GP8↔GP12, GP9↔GP13, GP10↔GP14, GP11↔GP15.
+- SPI master loop-back: GP9↔GP10 with GP10↔GP14 removed.
+- Leave GP0 unconnected.
+
+Debug-probe tests against a real target are off unless you ask for them
+(with GP8-11 free of jumpers):
+
+```sh
+AF_SWD_TARGET=stm32f1x  host/.venv/bin/pytest tests/integration/test_swd_target.py
+AF_JTAG_TARGET=stm32f1x host/.venv/bin/pytest tests/integration/test_jtag_target.py
+AF_JTAG_TARGET=esp32    host/.venv/bin/pytest tests/integration/test_jtag_target.py
+```
 
 ## Troubleshooting
 
-- **`openocd` says "Error: Unknown target type rp2350"** — you're running
-  the Homebrew openocd, not the `.pico-sdk` one. Use the full path above.
-- **No `/dev/cu.usbmodem*` appears** — check the debug probe actually
-  flashed successfully (`** Verified OK **` in the openocd output), and that
-  the Pico 2's own USB cable (not just the probe's) is connected — the
-  target board needs its own USB connection to enumerate as a device.
-- **Device enumerates but doesn't respond on the vendor interface** — make
-  sure nothing else (another terminal, another script) already has the
-  vendor interface claimed; only one client at a time.
-- **`DeviceBusyError: device ... is already locked by another process`** —
-  the CLI, MCP server, or a leftover script already holds the exclusive
-  lock. Only one `Device`/`Transport` connection is allowed per serial at a
-  time (a deliberate safety property, not a bug); close the other one first.
-- **MCP tool calls fail with a policy error even though you set the env
-  vars** — env vars in an MCP config's `env` block only apply to *that*
-  subprocess; setting them in your shell before running `claude` does
-  nothing, the client launches the server fresh. Double-check they're in
-  the `env` object of the server's config entry.
-- **`rp2350-signal-mcp: no device found`** on stderr right after Claude
-  Code starts it — same causes as the CDC/vendor-interface issues above,
-  plus: check the `--device` serial matches exactly (`rp2350-signal-cli
-  list`), and that you're pointing at the venv's binary, not a
-  same-named script elsewhere on PATH.
+- **OpenOCD: "Unknown target type rp2350"** — you're running a Homebrew
+  or apt OpenOCD. Use `~/.pico-sdk/openocd/0.12.0+dev/openocd`.
+- **Flashing fails with "SWD not supported", or OpenOCD talks to the
+  wrong device** — it picked the board's own debug probe instead of the
+  Raspberry Pi Debug Probe. Add `-c "cmsis-dap vid_pid 0x2e8a 0x000c"`
+  after `interface/cmsis-dap.cfg`.
+- **No serial port or board doesn't appear** — check the flash reported
+  `** Verified OK **`, and that the Pico 2's own USB cable is connected
+  (the Debug Probe's cable doesn't power the Pico's USB).
+- **`DeviceBusyError: ... already locked by another process`** — another
+  program (CLI, MCP server, GUI, a script) is using the board. Only one
+  may connect at a time; close the other one.
+- **MCP tools refuse with a policy error although you set the variables**
+  — they must be in the server's `env` block in the MCP config, not your
+  shell.
+- **`rp2350-signal-mcp: no device found`** — check the `--device` serial
+  matches `rp2350-signal-cli list`, and that the config points at the
+  virtual environment's binary.
+- **`spi_xfer` returns status 8 (resource busy)** — a debug session owns
+  GP8-11. Close the debugger; a session left open by a crashed tool closes
+  itself after 10 seconds.
+- **Debugger can't read the target's memory (reads stall)** — often an
+  STM32 whose firmware sleeps. Connect under reset (`reset_config srst_only
+  srst_nogate connect_assert_srst`, with nRESET wired).
+- **ESP32 JTAG scan reads all ones** — its application is using GPIO12-15.
+  Flash one that leaves them free.
+- **Debugger can't find the microcontroller on a Nucleo board** — remove
+  the CN2 jumpers and wire to the morpho-header pins, not CN4.
+- **An unconnected digital input reads 1** — floating input; see the
+  electrical notes under [Pinout](#pinout).

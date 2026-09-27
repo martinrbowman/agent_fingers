@@ -60,13 +60,14 @@ class Device:
         fields = pc.CAPABILITIES_RESPONSE_STRUCT.unpack(self._call(pc.OPCODE_GET_CAPABILITIES))
         keys = ["digital_channel_count", "spi_master_count", "spi_slave_count",
                 "i2c_master_count", "i2c_slave_count", "uart_count",
-                "adc_channel_count", "reserved"]
+                "adc_channel_count", "debug_probe_ports"]
         return dict(zip(keys, fields))
 
     def get_status(self):
         (uptime_us, reset_cause, safe_state_reason, outputs_armed, armed_mask,
          frames_ok, magic_resyncs, err_bad_version, err_bad_length, err_bad_crc,
-         err_oversize, err_stalled_frame, arm_challenge) = pc.STATUS_RESPONSE_STRUCT.unpack(
+         err_oversize, err_stalled_frame, arm_challenge, debug_active, debug_mode,
+         debug_last_end_reason, _reserved, debug_session_count) = pc.STATUS_RESPONSE_STRUCT.unpack(
             self._call(pc.OPCODE_GET_STATUS)
         )
         return {
@@ -85,6 +86,14 @@ class Device:
                 "err_stalled_frame": err_stalled_frame,
             },
             "arm_challenge": arm_challenge,  # raw 16 bytes; feed straight into arm_outputs()
+            # CMSIS-DAP probe session: started/ended by the DAP interface only.
+            "debug_session": {
+                "active": bool(debug_active),
+                "mode": pc.DEBUG_MODE_NAMES.get(debug_mode, debug_mode),
+                "last_end_reason": pc.DEBUG_END_REASON_NAMES.get(debug_last_end_reason,
+                                                                 debug_last_end_reason),
+                "session_count": debug_session_count,
+            },
         }
 
     def ping(self, payload: bytes = b""):
@@ -232,14 +241,34 @@ class Device:
         return {"bytes_received": bytes_received, "bytes_sent": bytes_sent,
                 "transaction_count": transaction_count}
 
+    def spi_slave_read(self, max_bytes: int = 256):
+        """Drains MOSI bytes the slave captured since the last read. Only
+        valid while the slave is enabled (raises DeviceStatusError otherwise)."""
+        resp = self._call(pc.OPCODE_SPI_SLAVE_READ, pc.SPI_SLAVE_READ_REQUEST_STRUCT.pack(max_bytes))
+        header_size = pc.SPI_SLAVE_READ_RESPONSE_STRUCT.size
+        total_received, ring_overrun_count, returned_count, _reserved = \
+            pc.SPI_SLAVE_READ_RESPONSE_STRUCT.unpack(resp[:header_size])
+        return {"data": resp[header_size:header_size + returned_count],
+                "total_received": total_received, "ring_overrun_count": ring_overrun_count}
+
     # -- Events -----------------------------------------------------------------------
 
     def poll_event(self, timeout: float = 0.0):
         """Returns the next unsolicited EVENT frame as {"opcode":, "status":,
         "payload":}, or None if none arrived within `timeout` seconds.
-        Currently emitted: digital-capture-complete (opcode=DIGITAL_CAPTURE_STOP)
-        and ADC block-ready (opcode=ADC_SCAN_READ), both bounded-op completions."""
+        Currently emitted: digital-capture-complete (opcode=DIGITAL_CAPTURE_STOP),
+        ADC block-ready (opcode=ADC_SCAN_READ), and debug-probe session
+        start/end (opcode=DEBUG_SESSION_EVENT, see parse_debug_session_event)."""
         frame = self._t.poll_event(timeout=timeout)
         if frame is None:
             return None
         return {"opcode": frame["opcode"], "status": frame["status"], "payload": frame["payload"]}
+
+
+def parse_debug_session_event(event):
+    """Decodes a DEBUG_SESSION_EVENT payload from poll_event()."""
+    active, mode, end_reason, _reserved, session_count = \
+        pc.DEBUG_SESSION_EVENT_STRUCT.unpack(event["payload"])
+    return {"active": bool(active), "mode": pc.DEBUG_MODE_NAMES.get(mode, mode),
+            "end_reason": pc.DEBUG_END_REASON_NAMES.get(end_reason, end_reason),
+            "session_count": session_count}

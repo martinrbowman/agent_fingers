@@ -18,6 +18,20 @@
 #define LEASE_MAX_MS     30000u
 #define LEASE_DEFAULT_MS 2000u
 
+// RP2350 A2 erratum E9: a Bank 0 pad with its input buffer enabled, once
+// driven high and then released, latches at ~2.2V -- the internal
+// pull-down is too weak to pull it back and it reads 1 indefinitely.
+// Reproduced on this board: all 8 channels driven high, disarmed, still
+// read 0xFF three seconds later. The erratum's workaround is to keep the
+// input buffer off except while actually sampling (clearing IE also
+// releases a latched pad), so input enables here are owned by this module
+// and only turned on for a DIGITAL_READ's mask (briefly) or for the whole
+// bank while a capture runs. Note gpio_set_function()/pio_gpio_init()
+// silently turn IE back on, so any re-mux must be followed by
+// digital_bank_reapply_input_enables().
+#define DIGITAL_INPUT_SETTLE_US   2u  // IE on -> first valid sample
+#define DIGITAL_RELEASE_SETTLE_US 10u // released pin -> pull-down has discharged it
+
 // RP2350's DMA transfer-count register reserves its top 4 bits for a MODE
 // field -- valid count range is 0 to 2^28-1, not the full 32 bits. Plain
 // 0xFFFFFFFFu as an "unbounded, run until stopped" sentinel sets those
@@ -32,6 +46,7 @@ static uint s_sample_sm;
 
 static uint8_t s_pindirs;
 static uint8_t s_values;
+static uint8_t s_input_enabled; // pad IE bits currently set on GP0-7
 
 static bool     s_armed;
 static uint8_t  s_armed_mask;
@@ -41,6 +56,7 @@ static absolute_time_t s_lease_expires;
 static uint8_t s_challenge[16];
 
 static uint s_capture_sm;
+static uint s_capture_offset;
 static int  s_capture_dma_chan;
 // RP2350 DMA ring wrap works by masking address bits, so the ring region
 // must be aligned to its own size (2^12 = 4096 bytes here) — an unaligned
@@ -71,12 +87,34 @@ static void ctrl_push(uint8_t pindirs, uint8_t values) {
     pio_sm_put_blocking(DIGITAL_PIO, s_ctrl_sm, values);
 }
 
+static void set_input_enables(uint8_t mask) {
+    for (uint channel = 0; channel < DIGITAL_PIN_COUNT; channel++) {
+        gpio_set_input_enabled(DIGITAL_BASE_PIN + channel, (mask >> channel) & 1u);
+    }
+    s_input_enabled = mask;
+}
+
+// What the input enables should be when no one-shot read is in progress:
+// all on while a capture is sampling the bank, all off otherwise (E9).
+static uint8_t idle_input_mask(void) {
+    return s_capture_active ? 0xFFu : 0x00u;
+}
+
 static void force_safe_locked(void) {
+    // IE off before letting go of the pins, so a channel that was driving
+    // high can't latch at ~2.2V (E9) as it's released. If a capture needs
+    // the inputs back, wait for the pull-downs to discharge the released
+    // pins first -- re-enabling IE on a pin that's still high would latch.
+    set_input_enables(0);
     s_pindirs = 0;
     s_values = 0;
     ctrl_push(0, 0);
     s_armed = false;
     s_armed_mask = 0;
+    if (idle_input_mask()) {
+        busy_wait_us_32(DIGITAL_RELEASE_SETTLE_US);
+        set_input_enables(idle_input_mask());
+    }
 }
 
 static uint32_t clamp_lease(uint32_t requested_ms) {
@@ -107,6 +145,8 @@ void digital_bank_init(void) {
         // floating-noise readings.
         gpio_pull_down(pin);
     }
+    // pio_gpio_init() left every input buffer on; E9 needs them off by default.
+    set_input_enables(0);
     pio_sm_set_consecutive_pindirs(DIGITAL_PIO, s_ctrl_sm, DIGITAL_BASE_PIN, DIGITAL_PIN_COUNT, false);
 
     pio_sm_config ctrl_cfg = digital_io_ctrl_program_get_default_config(ctrl_offset);
@@ -122,6 +162,7 @@ void digital_bank_init(void) {
     pio_sm_set_enabled(DIGITAL_PIO, s_sample_sm, true);
 
     uint capture_offset = pio_add_program(DIGITAL_PIO, &digital_io_capture_program);
+    s_capture_offset = capture_offset;
     s_capture_sm = pio_claim_unused_sm(DIGITAL_PIO, true);
 
     pio_sm_config capture_cfg = digital_io_capture_program_get_default_config(capture_offset);
@@ -156,6 +197,10 @@ void digital_bank_task(void) {
 
 void digital_bank_force_safe(void) {
     force_safe_locked();
+}
+
+void digital_bank_reapply_input_enables(void) {
+    set_input_enables(s_input_enabled);
 }
 
 bool digital_bank_armed(void) {
@@ -219,8 +264,17 @@ bool digital_bank_write_masked(uint8_t mask, uint8_t values) {
 }
 
 uint8_t digital_bank_read(uint8_t mask) {
+    uint8_t idle = idle_input_mask();
+    bool need_enable = (mask & (uint8_t)~s_input_enabled) != 0;
+    if (need_enable) {
+        set_input_enables(idle | mask);
+        busy_wait_us_32(DIGITAL_INPUT_SETTLE_US);
+    }
     pio_sm_put_blocking(DIGITAL_PIO, s_sample_sm, 0);
     uint32_t word = pio_sm_get_blocking(DIGITAL_PIO, s_sample_sm);
+    if (need_enable) {
+        set_input_enables(idle);
+    }
     return (uint8_t)(word & 0xFFu & mask);
 }
 
@@ -291,6 +345,13 @@ void digital_capture_start(uint32_t rate_hz, uint32_t max_samples,
     pio_sm_set_enabled(DIGITAL_PIO, s_capture_sm, false);
     pio_sm_clear_fifos(DIGITAL_PIO, s_capture_sm);
     pio_sm_restart(DIGITAL_PIO, s_capture_sm);
+    // pio_sm_restart() doesn't reset the PC. A bounded capture's SM keeps
+    // sampling after DMA stops until the FIFO fills, then gets disabled
+    // stalled on `push` -- without this jump, the next capture's first
+    // sample is that leftover push instead of a fresh read (intermittent
+    // sample-0 corruption, seen as test_bounded_capture_completes_exactly
+    // failing roughly half the time).
+    pio_sm_exec(DIGITAL_PIO, s_capture_sm, pio_encode_jmp(s_capture_offset));
 
     float clkdiv = (float)clock_get_hz(clk_sys) / (3.0f * (float)granted_hz);
     pio_sm_set_clkdiv(DIGITAL_PIO, s_capture_sm, clkdiv);
@@ -300,7 +361,7 @@ void digital_capture_start(uint32_t rate_hz, uint32_t max_samples,
     channel_config_set_read_increment(&dma_cfg, false);
     channel_config_set_write_increment(&dma_cfg, true);
     channel_config_set_dreq(&dma_cfg, pio_get_dreq(DIGITAL_PIO, s_capture_sm, false));
-    channel_config_set_ring(&dma_cfg, true, 12); // write ring: 2^12 = 4096 bytes = 1024 samples
+    channel_config_set_ring(&dma_cfg, true, 14); // write ring: 2^14 = 16384 bytes = 4096 samples
 
     // Bounded capture: DMA itself stops exactly at clamped_max transfers, no
     // polling-based approximate stop needed. Unbounded: an effectively
@@ -311,8 +372,10 @@ void digital_capture_start(uint32_t rate_hz, uint32_t max_samples,
                            s_capture_buffer, &DIGITAL_PIO->rxf[s_capture_sm],
                            trans_count, true);
 
-    pio_sm_set_enabled(DIGITAL_PIO, s_capture_sm, true);
     s_capture_active = true;
+    set_input_enables(idle_input_mask());
+    busy_wait_us_32(DIGITAL_INPUT_SETTLE_US);
+    pio_sm_set_enabled(DIGITAL_PIO, s_capture_sm, true);
 
     if (out) {
         out->capture_id = s_capture_id;
@@ -327,6 +390,7 @@ void digital_capture_stop(digital_capture_stop_result_t *out) {
         pio_sm_set_enabled(DIGITAL_PIO, s_capture_sm, false);
         dma_channel_abort(s_capture_dma_chan);
         s_capture_active = false;
+        set_input_enables(idle_input_mask());
     }
     if (out) {
         out->capture_id = s_capture_id;
@@ -392,6 +456,7 @@ bool digital_capture_task(digital_capture_stop_result_t *out) {
         if (s_capture_max_samples > 0 && !dma_channel_is_busy(s_capture_dma_chan)) {
             pio_sm_set_enabled(DIGITAL_PIO, s_capture_sm, false);
             s_capture_active = false;
+            set_input_enables(idle_input_mask());
             s_capture_just_completed = true;
         }
     }

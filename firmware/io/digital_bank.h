@@ -20,6 +20,12 @@ void digital_bank_task(void);
 // safe_state_enter() — this is what actually makes that hook do something.
 void digital_bank_force_safe(void);
 
+// Rewrites this module's current pad input-enable state onto GP0-7. The
+// bank keeps input buffers off except while sampling (RP2350 A2 erratum
+// E9, see digital_bank.c); gpio_set_function()/pio_gpio_init() turn them
+// back on, so anything that re-muxes a bank pin must call this afterwards.
+void digital_bank_reapply_input_enables(void);
+
 bool digital_bank_armed(void);
 uint8_t digital_bank_armed_mask(void);
 
@@ -42,6 +48,7 @@ void digital_bank_renew_lease(void);
 bool digital_bank_write_masked(uint8_t mask, uint8_t values);
 
 // Samples all 8 pins now, returns the value with non-mask bits cleared.
+// Input buffers for the mask are turned on just for this sample (E9).
 uint8_t digital_bank_read(uint8_t mask);
 
 // Continuous periodic capture — a third PIO state machine, independent of
@@ -49,7 +56,7 @@ uint8_t digital_bank_read(uint8_t mask);
 // One capture at a time; a new START replaces whatever's running.
 
 #define DIGITAL_CAPTURE_MAX_RATE_HZ    200000u
-#define DIGITAL_CAPTURE_BUFFER_SAMPLES 1024u
+#define DIGITAL_CAPTURE_BUFFER_SAMPLES 4096u
 
 typedef struct {
     uint32_t capture_id;

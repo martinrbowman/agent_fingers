@@ -34,6 +34,7 @@ STATUS_BAD_CRC = 4
 STATUS_MALFORMED = 5
 STATUS_PAYLOAD_TOO_LARGE = 6
 STATUS_INTERNAL_ERROR = 7
+STATUS_RESOURCE_BUSY = 8  # pins owned by a debug-probe session
 
 OPCODE_GET_INFO = 1
 OPCODE_GET_CAPABILITIES = 2
@@ -59,11 +60,18 @@ OPCODE_SPI_XFER = 21
 OPCODE_SPI_SLAVE_CONFIG = 22
 OPCODE_PING = 23
 OPCODE_RESET_TO_BOOTSEL = 24
+OPCODE_SPI_SLAVE_READ = 25
+OPCODE_DEBUG_SESSION_EVENT = 26  # EVENT-only: debug-probe session started/ended
 
 # Request/response payload layouts for the opcodes implemented so far.
 INFO_RESPONSE_STRUCT = struct.Struct("<BBBB8s16s")
 CAPABILITIES_RESPONSE_STRUCT = struct.Struct("<BBBBBBBB")
-STATUS_RESPONSE_STRUCT = struct.Struct("<QBBBBIIIIIII16s")
+STATUS_RESPONSE_STRUCT = struct.Struct("<QBBBBIIIIIII16sBBBBI")
+
+# active,mode,end_reason,reserved,session_count
+DEBUG_SESSION_EVENT_STRUCT = struct.Struct("<BBBBI")
+DEBUG_MODE_NAMES = {0: "none", 1: "swd", 2: "jtag"}
+DEBUG_END_REASON_NAMES = {0: "none", 1: "disconnect", 2: "timeout", 3: "usb"}
 
 ARM_OUTPUTS_REQUEST_STRUCT = struct.Struct("<16sB3sI")  # challenge,output_mask,reserved,lease_ms
 ARM_OUTPUTS_RESPONSE_STRUCT = struct.Struct("<I")        # granted_lease_ms
@@ -142,6 +150,11 @@ SPI_XFER_RESPONSE_STRUCT = struct.Struct("<IHH")
 SPI_SLAVE_CONFIG_REQUEST_STRUCT = struct.Struct("<B3s")
 # bytes_received,bytes_sent,transaction_count
 SPI_SLAVE_CONFIG_RESPONSE_STRUCT = struct.Struct("<III")
+
+SPI_SLAVE_READ_REQUEST_STRUCT = struct.Struct("<H")  # max_bytes
+# total_received,ring_overrun_count,returned_count,reserved -- followed by
+# returned_count raw MOSI bytes
+SPI_SLAVE_READ_RESPONSE_STRUCT = struct.Struct("<IIHH")
 
 
 def crc32c(data: bytes) -> int:

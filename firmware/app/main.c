@@ -43,7 +43,6 @@ int main(void) {
         usb_transport_task();
         board_task();
         digital_bank_task();
-        spi_slave_task();
         protocol_dispatch_poll_events();
         blink_task();
     }

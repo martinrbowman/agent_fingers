@@ -356,12 +356,27 @@ def spi_xfer(tx_hex: str, hz: int = 100000, mode: int = 0) -> dict:
 def spi_slave_config(enabled: bool) -> dict:
     """Enables/disables this board acting as an SPI slave (GP12 SCK /
     GP13 MOSI / GP14 MISO / GP15 CS_n), mode 0 only. MISO continuously
-    repeats a fixed 0x00-0x07 pattern; MOSI is captured only for counting.
+    repeats a fixed 0x00-0x07 pattern; MOSI is captured into a 256-byte
+    ring, drained with spi_slave_read.
     bytes_sent in the response is an approximate pipeline-fill count, not
     an exact transmitted-byte count (reads ~5 even at idle — see
     protocol.md). Blocked unless RP2350_SIGNAL_ALLOW_WRITES=1."""
     policy.require_writes_enabled("spi_slave_config")
     return _get_device().spi_slave_config(enabled)
+
+
+@mcp.tool()
+@_audited("spi_slave_read")
+def spi_slave_read(max_bytes: int = 256) -> dict:
+    """Drains MOSI bytes the SPI slave captured since the last read (e.g. to
+    sniff a target's SPI bus). The slave must be enabled via
+    spi_slave_config first. The ring holds 256 bytes; if more arrived
+    between reads, the oldest are lost and counted in ring_overrun_count.
+    Known limitation: the slave doesn't gate on CS, so ~1 in 8 transfers
+    can come back shifted by one bit. Always allowed, a pure read."""
+    result = dict(_get_device().spi_slave_read(max_bytes))
+    result["data_b64"] = _b64(result.pop("data"))
+    return result
 
 
 # -- Entry point ---------------------------------------------------------------

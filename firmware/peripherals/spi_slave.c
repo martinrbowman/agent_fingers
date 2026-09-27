@@ -10,7 +10,7 @@
 #define SPI_SLAVE_MISO_PIN 14
 #define SPI_SLAVE_CS_PIN   15
 
-#define SPI_SLAVE_RX_BUFFER_SAMPLES 256u // ring, 1 byte each
+#define SPI_SLAVE_RX_BUFFER_SAMPLES SPI_SLAVE_RX_RING_BYTES // ring, 1 byte each
 #define SPI_SLAVE_RX_RING_SIZE_BITS 8u   // 2^8 = 256
 
 #define SPI_SLAVE_TX_PATTERN_SAMPLES 8u
@@ -51,8 +51,37 @@ static const uint8_t s_tx_pattern[SPI_SLAVE_TX_PATTERN_SAMPLES]
 
 static bool s_enabled;
 
-static uint32_t s_transaction_count;
-static bool     s_cs_was_high;
+// CS falling edges, counted by a GPIO IRQ rather than main-loop polling:
+// this board's own SPI master runs on the same core and blocks for the
+// whole transfer, so CS goes low and back high between two polls and a
+// polled counter never saw a single transaction (found on hardware:
+// transaction_count stayed 0 with CS wired and continuity confirmed).
+static volatile uint32_t s_transaction_count;
+
+static void cs_irq_handler(void) {
+    if (gpio_get_irq_event_mask(SPI_SLAVE_CS_PIN) & GPIO_IRQ_EDGE_FALL) {
+        gpio_acknowledge_irq(SPI_SLAVE_CS_PIN, GPIO_IRQ_EDGE_FALL);
+        s_transaction_count++;
+    }
+}
+
+static void set_cs_irq(bool enabled) {
+    if (enabled) {
+        // The raw edge latch fills regardless of the enable bit -- drop
+        // anything stale from while the slave was off.
+        gpio_acknowledge_irq(SPI_SLAVE_CS_PIN, GPIO_IRQ_EDGE_FALL);
+    }
+    gpio_set_irq_enabled(SPI_SLAVE_CS_PIN, GPIO_IRQ_EDGE_FALL, enabled);
+}
+
+static void set_listen_inputs(bool enabled) {
+    gpio_set_input_enabled(SPI_SLAVE_SCK_PIN, enabled);
+    gpio_set_input_enabled(SPI_SLAVE_MOSI_PIN, enabled);
+}
+
+
+static uint32_t s_rx_read_pos; // absolute byte index of the next unread byte
+static uint32_t s_rx_overrun_count;
 
 void spi_slave_init(void) {
     uint offset = pio_add_program(SPI_SLAVE_PIO, &spi_slave_mode0_program);
@@ -92,17 +121,28 @@ void spi_slave_init(void) {
     // independent of real SCK activity — see spi_slave_config_result_t.
     gpio_pull_down(SPI_SLAVE_SCK_PIN);
     gpio_pull_down(SPI_SLAVE_MOSI_PIN);
+    // RP2350 A2 erratum E9: an input pad with IE on, driven high and then
+    // left floating, latches at ~2.2V that the pull-down can't recover --
+    // an unplugged master could leave SCK/MOSI there. Keep both input
+    // buffers off while the slave is disabled; spi_slave_config() turns
+    // them on only for as long as the slave is listening. (CS has a
+    // pull-up, which E9 doesn't affect.)
+    set_listen_inputs(false);
 
     s_tx_dma_chan = dma_claim_unused_channel(true);
     s_rx_dma_chan = dma_claim_unused_channel(true);
     s_enabled = false;
-    s_cs_was_high = true;
+
+    gpio_add_raw_irq_handler(SPI_SLAVE_CS_PIN, cs_irq_handler);
+    irq_set_enabled(IO_IRQ_BANK0, true);
 }
 
 static void stop_hardware(void) {
     pio_sm_set_enabled(SPI_SLAVE_PIO, s_sm, false);
     dma_channel_abort(s_tx_dma_chan);
     dma_channel_abort(s_rx_dma_chan);
+    set_listen_inputs(false);
+    set_cs_irq(false);
 }
 
 // The DMA channel's own transfer_count register live-decrements from its
@@ -116,25 +156,13 @@ static void stop_hardware(void) {
 // 256-byte RX ring lands the write address back at exactly the same spot
 // it started, indistinguishable from zero bytes received when only
 // polled once per enable/disable cycle (which is all a blocking,
-// single-threaded SPI_XFER on the far end allows -- see spi_slave_task()).
+// single-threaded SPI_XFER on the far end allows).
 static uint32_t rx_bytes_transferred(void) {
     return SPI_SLAVE_CONTINUOUS_TRANSFER_COUNT - dma_channel_hw_addr(s_rx_dma_chan)->transfer_count;
 }
 
 static uint32_t tx_bytes_transferred(void) {
     return SPI_SLAVE_CONTINUOUS_TRANSFER_COUNT - dma_channel_hw_addr(s_tx_dma_chan)->transfer_count;
-}
-
-void spi_slave_task(void) {
-    if (!s_enabled) {
-        return;
-    }
-
-    bool cs_high = gpio_get(SPI_SLAVE_CS_PIN);
-    if (s_cs_was_high && !cs_high) {
-        s_transaction_count++;
-    }
-    s_cs_was_high = cs_high;
 }
 
 void spi_slave_config(bool enabled, spi_slave_config_result_t *out) {
@@ -155,13 +183,15 @@ void spi_slave_config(bool enabled, spi_slave_config_result_t *out) {
         out->transaction_count = s_transaction_count;
     }
 
-    s_transaction_count = 0;
-    s_cs_was_high = true;
+    s_transaction_count = 0; // CS IRQ already off: stop_hardware() or never enabled
+    s_rx_read_pos = 0;
+    s_rx_overrun_count = 0;
 
     if (!enabled) {
         return;
     }
 
+    set_listen_inputs(true);
     pio_sm_clear_fifos(SPI_SLAVE_PIO, s_sm);
     pio_sm_restart(SPI_SLAVE_PIO, s_sm);
 
@@ -194,5 +224,59 @@ void spi_slave_config(bool enabled, spi_slave_config_result_t *out) {
                            SPI_SLAVE_CONTINUOUS_TRANSFER_COUNT, true);
 
     pio_sm_set_enabled(SPI_SLAVE_PIO, s_sm, true);
+    set_cs_irq(true);
     s_enabled = true;
+}
+
+// PIO shifts right (LSB-first into the ISR) while the wire is MSB-first, so
+// each captured byte is bit-reversed relative to what the master sent --
+// same convention and fix as spi_master.c's RX path.
+static uint8_t reverse_bits8(uint8_t b) {
+    b = (uint8_t)(((b & 0xF0u) >> 4) | ((b & 0x0Fu) << 4));
+    b = (uint8_t)(((b & 0xCCu) >> 2) | ((b & 0x33u) << 2));
+    b = (uint8_t)(((b & 0xAAu) >> 1) | ((b & 0x55u) << 1));
+    return b;
+}
+
+bool spi_slave_read(uint16_t limit, uint8_t *data_out, uint16_t *returned_out,
+                    uint32_t *total_received_out, uint32_t *ring_overrun_out) {
+    if (!s_enabled) {
+        return false;
+    }
+
+    // The DMA transfer count is exact regardless of ring laps (see
+    // rx_bytes_transferred()), so no wrap tracking is needed here.
+    uint32_t total = rx_bytes_transferred();
+
+    uint32_t oldest_valid = (total > SPI_SLAVE_RX_BUFFER_SAMPLES)
+                                 ? (total - SPI_SLAVE_RX_BUFFER_SAMPLES) : 0;
+    if (s_rx_read_pos < oldest_valid) {
+        s_rx_overrun_count += oldest_valid - s_rx_read_pos;
+        s_rx_read_pos = oldest_valid;
+    }
+
+    uint16_t returned = 0;
+    if (s_rx_read_pos < total) {
+        uint32_t want = total - s_rx_read_pos;
+        if (want > limit) {
+            want = limit;
+        }
+        for (uint32_t i = 0; i < want; i++) {
+            uint32_t idx = (s_rx_read_pos + i) % SPI_SLAVE_RX_BUFFER_SAMPLES;
+            data_out[i] = reverse_bits8(s_rx_buffer[idx]);
+        }
+        returned = (uint16_t)want;
+        s_rx_read_pos += want;
+    }
+
+    if (returned_out) {
+        *returned_out = returned;
+    }
+    if (total_received_out) {
+        *total_received_out = total;
+    }
+    if (ring_overrun_out) {
+        *ring_overrun_out = s_rx_overrun_count;
+    }
+    return true;
 }

@@ -1,4 +1,5 @@
 #include "peripherals/spi_master.h"
+#include "debug/debug_session.h"
 #include "spi_master.pio.h"
 #include "hardware/pio.h"
 #include "hardware/dma.h"
@@ -48,16 +49,28 @@ static uint8_t reverse_bits8(uint8_t v) {
     return v;
 }
 
-void spi_master_init(void) {
-    uint offset = pio_add_program(SPI_MASTER_PIO, &spi_master_mode0_program);
-    s_sm = pio_claim_unused_sm(SPI_MASTER_PIO, true);
-
+static void attach_pins(void) {
     pio_gpio_init(SPI_MASTER_PIO, SPI_MASTER_SCK_PIN);
     pio_gpio_init(SPI_MASTER_PIO, SPI_MASTER_MOSI_PIN);
     pio_gpio_init(SPI_MASTER_PIO, SPI_MASTER_MISO_PIN);
     pio_sm_set_consecutive_pindirs(SPI_MASTER_PIO, s_sm, SPI_MASTER_SCK_PIN, 1, true);
     pio_sm_set_consecutive_pindirs(SPI_MASTER_PIO, s_sm, SPI_MASTER_MOSI_PIN, 1, true);
     pio_sm_set_consecutive_pindirs(SPI_MASTER_PIO, s_sm, SPI_MASTER_MISO_PIN, 1, false);
+    // RP2350 A2 erratum E9: an input pad with IE on can latch at ~2.2V after
+    // being driven high and released (e.g. an unplugged slave). MISO's input
+    // buffer stays off except for the duration of a transfer.
+    gpio_set_input_enabled(SPI_MASTER_MISO_PIN, false);
+
+    gpio_init(SPI_MASTER_CS_PIN);
+    gpio_set_dir(SPI_MASTER_CS_PIN, GPIO_OUT);
+    gpio_put(SPI_MASTER_CS_PIN, 1); // idle deasserted (active low)
+}
+
+void spi_master_init(void) {
+    uint offset = pio_add_program(SPI_MASTER_PIO, &spi_master_mode0_program);
+    s_sm = pio_claim_unused_sm(SPI_MASTER_PIO, true);
+
+    attach_pins();
 
     pio_sm_config c = spi_master_mode0_program_get_default_config(offset);
     sm_config_set_out_pins(&c, SPI_MASTER_MOSI_PIN, 1);
@@ -68,12 +81,30 @@ void spi_master_init(void) {
     pio_sm_init(SPI_MASTER_PIO, s_sm, offset, &c);
     pio_sm_set_enabled(SPI_MASTER_PIO, s_sm, true);
 
-    gpio_init(SPI_MASTER_CS_PIN);
-    gpio_set_dir(SPI_MASTER_CS_PIN, GPIO_OUT);
-    gpio_put(SPI_MASTER_CS_PIN, 1); // idle deasserted (active low)
-
     s_tx_dma_chan = dma_claim_unused_channel(true);
     s_rx_dma_chan = dma_claim_unused_channel(true);
+}
+
+void spi_master_release_pins(void) {
+    pio_sm_set_enabled(SPI_MASTER_PIO, s_sm, false);
+    for (uint pin = SPI_MASTER_SCK_PIN; pin <= SPI_MASTER_CS_PIN; pin++) {
+        gpio_init(pin); // SIO, input: high-Z
+        gpio_disable_pulls(pin);
+        gpio_set_input_enabled(pin, false); // E9; the debug probe re-enables what it reads
+    }
+}
+
+void spi_master_reclaim_pins(void) {
+    attach_pins();
+}
+
+// Stops a transfer mid-flight because a debug session claimed the pins.
+static void abort_for_debug_session(void) {
+    pio_sm_set_enabled(SPI_MASTER_PIO, s_sm, false); // stop clocking first
+    dma_channel_abort(s_tx_dma_chan);
+    dma_channel_abort(s_rx_dma_chan);
+    gpio_put(SPI_MASTER_CS_PIN, 1);
+    gpio_set_input_enabled(SPI_MASTER_MISO_PIN, false);
 }
 
 static uint32_t clamp_hz(uint32_t requested_hz) {
@@ -87,13 +118,16 @@ static uint32_t clamp_hz(uint32_t requested_hz) {
     return hz;
 }
 
-bool spi_master_xfer(uint8_t mode, uint32_t hz, const uint8_t *tx_data, uint16_t len,
-                      uint8_t *rx_data_out, spi_master_xfer_result_t *out) {
+spi_master_status_t spi_master_xfer(uint8_t mode, uint32_t hz, const uint8_t *tx_data, uint16_t len,
+                                     uint8_t *rx_data_out, spi_master_xfer_result_t *out) {
     if (mode != 0) {
-        return false;
+        return SPI_MASTER_INVALID;
     }
     if (len > SPI_MASTER_MAX_LEN) {
-        return false;
+        return SPI_MASTER_INVALID;
+    }
+    if (debug_session_pins_busy()) {
+        return SPI_MASTER_BUSY;
     }
 
     uint32_t granted_hz = clamp_hz(hz);
@@ -102,7 +136,7 @@ bool spi_master_xfer(uint8_t mode, uint32_t hz, const uint8_t *tx_data, uint16_t
         if (out) {
             out->granted_hz = granted_hz;
         }
-        return true;
+        return SPI_MASTER_OK;
     }
 
     uint32_t clk_sys_hz = clock_get_hz(clk_sys);
@@ -131,6 +165,7 @@ bool spi_master_xfer(uint8_t mode, uint32_t hz, const uint8_t *tx_data, uint16_t
     channel_config_set_write_increment(&rx_cfg, true);
     channel_config_set_dreq(&rx_cfg, pio_get_dreq(SPI_MASTER_PIO, s_sm, false));
 
+    gpio_set_input_enabled(SPI_MASTER_MISO_PIN, true); // off between transfers (E9)
     gpio_put(SPI_MASTER_CS_PIN, 0);
     pio_sm_set_enabled(SPI_MASTER_PIO, s_sm, true);
 
@@ -146,10 +181,19 @@ bool spi_master_xfer(uint8_t mode, uint32_t hz, const uint8_t *tx_data, uint16_t
                            (const volatile uint8_t *)&SPI_MASTER_PIO->rxf[s_sm] + 3, len, true);
     dma_channel_configure(s_tx_dma_chan, &tx_cfg, &SPI_MASTER_PIO->txf[s_sm], s_tx_buffer, len, true);
 
-    dma_channel_wait_for_finish_blocking(s_rx_dma_chan);
+    // Poll rather than dma_channel_wait_for_finish_blocking(): a debug
+    // session always wins the pins, even mid-transfer (up to ~400ms at the
+    // rate floor with a full-length buffer).
+    while (dma_channel_is_busy(s_rx_dma_chan)) {
+        if (debug_session_claim_pending()) {
+            abort_for_debug_session();
+            return SPI_MASTER_BUSY;
+        }
+    }
 
     gpio_put(SPI_MASTER_CS_PIN, 1);
     pio_sm_set_enabled(SPI_MASTER_PIO, s_sm, false);
+    gpio_set_input_enabled(SPI_MASTER_MISO_PIN, false);
 
     for (uint16_t i = 0; i < len; i++) {
         rx_data_out[i] = reverse_bits8(s_rx_buffer[i]);
@@ -158,5 +202,5 @@ bool spi_master_xfer(uint8_t mode, uint32_t hz, const uint8_t *tx_data, uint16_t
     if (out) {
         out->granted_hz = granted_hz;
     }
-    return true;
+    return SPI_MASTER_OK;
 }

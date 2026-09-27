@@ -10,6 +10,7 @@
 #include "peripherals/i2c_bus.h"
 #include "peripherals/spi_master.h"
 #include "peripherals/spi_slave.h"
+#include "debug/debug_session.h"
 #include "build_info.h"
 #include "pico/unique_id.h"
 #include <string.h>
@@ -128,7 +129,7 @@ static size_t handle_get_capabilities(uint8_t *out) {
         .i2c_slave_count = 1,
         .uart_count = 1,
         .adc_channel_count = 3,
-        .reserved = 0,
+        .debug_probe_ports = 0x07, // SWD | JTAG | SWO (UART)
     };
     memcpy(out, &r, sizeof(r));
     return sizeof(r);
@@ -150,6 +151,13 @@ static size_t handle_get_status(uint8_t *out) {
         .err_stalled_frame = s_err_stalled_frame,
     };
     digital_bank_get_challenge(r.arm_challenge);
+    debug_session_status_t dbg;
+    debug_session_get_status(&dbg);
+    r.debug_session_active = dbg.active ? 1 : 0;
+    r.debug_mode = dbg.mode;
+    r.debug_last_end_reason = dbg.last_end_reason;
+    r.reserved = 0;
+    r.debug_session_count = dbg.session_count;
     memcpy(out, &r, sizeof(r));
     return sizeof(r);
 }
@@ -233,6 +241,37 @@ static size_t handle_spi_slave_config(const uint8_t *req_payload, uint32_t req_l
     return sizeof(resp);
 }
 
+static size_t handle_spi_slave_read(const uint8_t *req_payload, uint32_t req_len,
+                                     uint8_t *out, uint16_t *status_out) {
+    if (req_len != sizeof(spi_slave_read_request_t)) {
+        *status_out = STATUS_MALFORMED;
+        return 0;
+    }
+    spi_slave_read_request_t req;
+    memcpy(&req, req_payload, sizeof(req));
+
+    uint16_t header_size = (uint16_t)sizeof(spi_slave_read_response_t);
+    uint16_t max_bytes_fit = (uint16_t)(PROTOCOL_RX_PAYLOAD_CAP - header_size);
+    uint16_t limit = req.max_bytes > max_bytes_fit ? max_bytes_fit : req.max_bytes;
+
+    uint16_t returned = 0;
+    uint32_t total_received = 0;
+    uint32_t ring_overrun = 0;
+    if (!spi_slave_read(limit, out + header_size, &returned, &total_received, &ring_overrun)) {
+        *status_out = STATUS_MALFORMED; // slave not enabled
+        return 0;
+    }
+
+    spi_slave_read_response_t resp = {
+        .total_received = total_received,
+        .ring_overrun_count = ring_overrun,
+        .returned_count = returned,
+        .reserved = 0,
+    };
+    memcpy(out, &resp, sizeof(resp));
+    return (size_t)header_size + returned;
+}
+
 static size_t handle_spi_xfer(const uint8_t *req_payload, uint32_t req_len,
                                uint8_t *out, uint16_t *status_out) {
     if (req_len < sizeof(spi_xfer_request_t)) {
@@ -254,8 +293,13 @@ static size_t handle_spi_xfer(const uint8_t *req_payload, uint32_t req_len,
     }
 
     spi_master_xfer_result_t result;
-    if (!spi_master_xfer(req.mode, req.hz, req_payload + sizeof(req), req.len,
-                          out + header_size, &result)) {
+    spi_master_status_t st = spi_master_xfer(req.mode, req.hz, req_payload + sizeof(req), req.len,
+                                             out + header_size, &result);
+    if (st == SPI_MASTER_BUSY) {
+        *status_out = STATUS_RESOURCE_BUSY; // debug session owns GP8-11
+        return 0;
+    }
+    if (st != SPI_MASTER_OK) {
         *status_out = STATUS_MALFORMED; // unsupported mode (only 0 this pass), or len too large
         return 0;
     }
@@ -633,6 +677,12 @@ static void dispatch_opcode(void) {
             type = FRAME_TYPE_ERROR;
         }
         break;
+    case OPCODE_SPI_SLAVE_READ:
+        out_len = handle_spi_slave_read(s_payload_buf, s_payload_have, payload_out, &status);
+        if (status != STATUS_OK) {
+            type = FRAME_TYPE_ERROR;
+        }
+        break;
     case OPCODE_DIGITAL_CAPTURE_START:
         out_len = handle_digital_capture_start(s_payload_buf, s_payload_have, payload_out, &status);
         if (status != STATUS_OK) {
@@ -806,5 +856,14 @@ void protocol_dispatch_poll_events(void) {
         };
         emit_frame(0, OPCODE_ADC_SCAN_READ, FRAME_TYPE_EVENT, STATUS_OK,
                    (const uint8_t *)&resp, sizeof(resp));
+    }
+
+    // Pin handover for debug-probe sessions happens here, on core0, between
+    // requests -- an SPI transfer that was running has already aborted
+    // itself by the time we get here (see spi_master_xfer()).
+    debug_session_event_t dbg_ev;
+    if (debug_session_core0_task(&dbg_ev)) {
+        emit_frame(0, OPCODE_DEBUG_SESSION_EVENT, FRAME_TYPE_EVENT, STATUS_OK,
+                   (const uint8_t *)&dbg_ev, sizeof(dbg_ev));
     }
 }

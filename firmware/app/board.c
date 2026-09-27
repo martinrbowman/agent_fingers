@@ -8,10 +8,19 @@
 // generous "catch a hung firmware" backstop, petted every loop iteration.
 #define BOARD_WATCHDOG_TIMEOUT_MS 4000
 
+// Watchdog scratch 0-3 are free for applications (the SDK/bootrom use 4-7).
+#define BOARD_SCRATCH_RESET_NOTE 0
+#define BOARD_CORE1_STALL_MAGIC  0xC0DE1D1Eu
+
 static reset_cause_t s_reset_cause;
 
 void board_init(void) {
     s_reset_cause = watchdog_caused_reboot() ? RESET_CAUSE_WATCHDOG : RESET_CAUSE_POWER_ON;
+    if (s_reset_cause == RESET_CAUSE_WATCHDOG &&
+        watchdog_hw->scratch[BOARD_SCRATCH_RESET_NOTE] == BOARD_CORE1_STALL_MAGIC) {
+        s_reset_cause = RESET_CAUSE_CORE1_STALL;
+    }
+    watchdog_hw->scratch[BOARD_SCRATCH_RESET_NOTE] = 0;
 
     pin_claims_self_check();
     // safe_state_enter(SAFE_STATE_BOOT) happens in main(), after
@@ -31,4 +40,8 @@ uint64_t board_time_us(void) {
 
 reset_cause_t board_reset_cause(void) {
     return s_reset_cause;
+}
+
+void board_note_core1_stall(void) {
+    watchdog_hw->scratch[BOARD_SCRATCH_RESET_NOTE] = BOARD_CORE1_STALL_MAGIC;
 }
